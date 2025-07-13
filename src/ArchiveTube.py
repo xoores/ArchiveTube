@@ -92,7 +92,9 @@ class DataHandler:
             self.load_channel_list_from_file()
 
         full_cookies_path = os.path.join(self.config_folder, "cookies.txt")
-        self.cookies_path = full_cookies_path if os.path.exists(full_cookies_path) else None
+        if os.path.exists(full_cookies_path):
+            self.log.warning("Using provided cookies.txt!")
+            self.ytd_extra_parameters["cookiefile"] = full_cookies_path
 
         task_thread = threading.Thread(target=self.schedule_checker, daemon=True)
         task_thread.start()
@@ -491,7 +493,7 @@ class DataHandler:
                     ]
                 )
 
-                folder_and_filename = os.path.join(channel_folder_path, cleaned_title)
+                #folder_and_filename = os.path.join(channel_folder_path, cleaned_title)
                 ydl_opts = {
                     "paths": {"home": channel_folder_path, "temp": temp_dir.name},
                     "format": selected_format,
@@ -522,9 +524,6 @@ class DataHandler:
 
                 if merge_output_format:
                     ydl_opts["merge_output_format"] = merge_output_format
-
-                if self.cookies_path:
-                    ydl_opts["cookiefile"] = self.cookies_path
 
                 yt_downloader = yt_dlp.YoutubeDL(ydl_opts)
                 self.log.info(f"{channel["Name"]}|{item["id"]}> Download parameters: {ydl_opts}")
