@@ -248,7 +248,7 @@ class DataHandler:
             playlist = ydl.extract_info(playlist_url, download=False)
 
         today = datetime.datetime.now()
-        cutoff_date = -1 if days_to_retrieve == -1 else today - datetime.timedelta(days=days_to_retrieve)
+        cutoff_date = None if days_to_retrieve == -1 else today - datetime.timedelta(days=days_to_retrieve)
 
         fails = 0
         for video in playlist["entries"]:
@@ -288,7 +288,7 @@ class DataHandler:
                 current_time = time.time()
                 age_in_hours = (current_time - video_timestamp) / 3600
 
-                if cutoff_date > -1:
+                if cutoff_date is not None:
                     if video_upload_date < cutoff_date:
                         self.log.info(f"{channel["Name"]}|{video["id"]}> Ignoring video as it is older than the cut-off {cutoff_date}.")
                         self.log.info(f"{channel["Name"]}|{video["id"]}> No more videos in date range")
