@@ -35,22 +35,50 @@ def video_duration_filter( info, *, incomplete ):
     return None
 
 
+class FancyFormatter(logging.Formatter):
+    FMT_SEQ = "\x1b["
+    ASCII_COLORS = {
+        logging.CRITICAL: "1;31",  # red + bold
+        logging.ERROR:    "0;31",  # red
+        logging.WARNING:  "0;33",  # yellow
+        logging.INFO:     "0;37",  # white
+        logging.DEBUG:    "2;37",  # gray
+    }
+
+    def __init__( self, fmt ):
+        logging.Formatter.__init__(self, fmt)
+        self._fmt = fmt
+
+    def format( self, r ):
+        return logging.Formatter(self.FMT_SEQ + self.ASCII_COLORS[r.levelno] + "m"
+                                 + self._fmt
+                                 + self.FMT_SEQ + "0m", "%H:%M:%S"
+                                 ).format(r)
+
+
 class DataHandler:
     def __init__(self):
-        logging.basicConfig(level=logging.INFO, format="%(message)s")
+        #logging.basicConfig(level=logging.INFO, format="%(message)s")
         self.log = logging.getLogger()
+        self.log.setLevel(logging.INFO)
+        log_shandler = logging.StreamHandler()
+        logger_fmt = "%(asctime)s.%(msecs)03d [%(levelname).1s]  %(message)s"
+        log_shandler.setFormatter(FancyFormatter(logger_fmt))
+        self.log.addHandler(log_shandler)
+
 
         self.task_thread = None
         self.task_thread_started = False
 
         app_name_text = os.path.basename(__file__).replace(".py", "")
         release_version = os.environ.get("RELEASE_VERSION", "unknown")
-        self.log.warning(f"{'*' * 50}\n")
-        self.log.warning(f"{app_name_text} Version: {release_version}\n")
+        self.log.warning(f"{'*' * 50}")
+        self.log.warning(f"{app_name_text} Version: {release_version}")
         self.log.warning(f"{'*' * 50}")
 
         self.download_progress_report_perc = 0
         self.config_folder = "config"
+        self.process_channel_errors = 0
         self.download_folder = "downloads"
         self.audio_download_folder = "audio_downloads"
         self.media_server_addresses = ""
@@ -68,6 +96,11 @@ class DataHandler:
         self.subtitle_languages = os.environ.get("subtitle_languages", "en").split(",")
         self.include_id_in_filename = True
         self.verbose_logs = os.environ.get("verbose_logs", "false").lower() == "true"
+
+        if self.verbose_logs:
+            self.log.setLevel(logging.DEBUG)
+            self.log.debug("Verbose logs enabled")
+
         self.ytd_extra_parameters = {
             "ffmpeg_location": "/usr/bin/ffmpeg",
             "verbose": self.verbose_logs,
@@ -321,9 +354,9 @@ class DataHandler:
                 fails += 1
                 self.log.error(f"{channel["Name"]}|{video["id"]}> Error extracting details: {str(e)}")
 
-                if fails > 3:
+                if fails >= 3:
                     self.log.error(f"{channel["Name"]}> Too many errors in succession, aborting! Please check logs.")
-                    break
+                    return None
 
         return video_to_download_list
 
@@ -446,6 +479,8 @@ class DataHandler:
             return file_mtime
 
     def download_items(self, item_list, channel_folder_path, channel):
+        fails = 0
+        temp_dir = None
         for item in item_list:
             self.log.info(f"{channel["Name"]}|{item["id"]}> Processing download of '{item["title"]}'")
 
@@ -533,15 +568,25 @@ class DataHandler:
                 yt_ret = yt_downloader.download([link])
                 self.log.info(f"{channel["Name"]}|{item["id"]}> yt-dlp finished with return code {yt_ret}")
 
+
                 #self.add_extra_metadata(f"{folder_and_filename}.{selected_ext}", item)
 
+                # Update media counter so we can see progress in GUI
+                channel.update( { "Item_Count": self.count_media_files(channel_folder_path) } )
+                socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
+
+                fails = 0
             except Exception as e:
-                self.log.error(f"{channel["Name"]}> Error downloading video: {link}. Error message: {e}")
+                fails += 1
+                self.log.error(f"{channel["Name"]}|{item["id"]}> Error downloading video: {link}. Error message: {e}")
 
-            finally:
-                temp_dir.cleanup()
+                if fails >= 3:
+                    self.log.error(f"{channel["Name"]}> Too many errors in succession, aborting! Please check logs.")
+                    return False
 
-        self.media_server_scan_req_flag = True
+        if temp_dir is not None:
+            temp_dir.cleanup()
+        return True
 
     def progress_callback(self, progress_data):
         status = progress_data.get("status", "unknown")
@@ -594,13 +639,24 @@ class DataHandler:
             self.log.error(f"Error adding metadata to {file_path}: {e}")
 
     def master_queue(self):
+        if self.task_thread_started:
+            self.log.info("Sync Task already running, not starting another one until it finishes")
+            return
+
+        sync_eligible_channels = 0
         try:
+            self.task_thread_started = True
             self.media_server_scan_req_flag = False
-            self.log.warning("Sync Task started...")
+            self.process_channel_errors = 0
+            self.log.warning(f"Sync Task started for {len(self.req_channel_list)} channels")
+            socketio.emit("sync_state_changed", { "Sync_State": "run" })
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.thread_limit) as executor:
                 futures = []
                 for channel in self.req_channel_list:
+                    if self.process_channel_errors >= 3:
+                        raise Exception("Too many errors, aborting sync! Please check logs.")
+
                     if channel.get("Last_Synced") in ["In Progress", "Queued"]:
                         self.log.info(f"queue|{channel["Name"]}> Channel synchronization already in progress")
                         continue
@@ -611,6 +667,7 @@ class DataHandler:
 
                     self.log.info(f"queue|{channel["Name"]}> Adding channel to sync queue")
                     channel["Last_Synced"] = "Queued"
+                    sync_eligible_channels += 1
                     futures.append(executor.submit(self.process_channel, channel))
                 socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
             concurrent.futures.wait(futures)
@@ -626,19 +683,25 @@ class DataHandler:
                 self.log.info("Media Server Sync not required")
 
         except Exception as e:
-            self.log.error(f"Error in Queue: {str(e)}")
-            self.log.info("Sync Finished: Incomplete")
+            self.log.error(f"Sync error: {str(e)}")
+
+        if self.process_channel_errors >= 3 or self.process_channel_errors == sync_eligible_channels:
+            self.log.error(f"Sync failed completely ({self.process_channel_errors}/{sync_eligible_channels} failed)")
             socketio.emit("sync_state_changed", {"Sync_State": "stop", "Success": False})
 
-        else:
-            self.log.info("Sync Finished: Complete")
+        elif self.process_channel_errors > 0:
+            self.log.warning(f"Sync finished with some errors ({self.process_channel_errors}/{sync_eligible_channels} failed)")
             socketio.emit("sync_state_changed", {"Sync_State": "stop", "Success": True})
 
-        finally:
-            socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
-            self.task_thread_started = False
+        else:
+            self.log.info(f"Sync Finished: Completed all {sync_eligible_channels} channels")
+            socketio.emit("sync_state_changed", {"Sync_State": "stop", "Success": True})
+
+        socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
+        self.task_thread_started = False
 
     def process_channel(self, channel):
+        sync_encountered_problem = False
         try:
             channel["Last_Synced"] = "In Progress"
             channel_folder_path = os.path.join(self.audio_download_folder, channel["Name"]) if channel["Audio_Only"] else os.path.join(self.download_folder, channel["Name"])
@@ -650,23 +713,43 @@ class DataHandler:
             self.log.info(f'{channel["Name"]}> Getting list of videos from {channel["Link"]}')
             item_download_list = self.get_list_of_videos_from_youtube(channel, current_channel_files)
 
-            if item_download_list:
+            # We generally don't bail out when we increase process_channel_errors counter because we still want to
+            # continue & clean up old files etc...
+            if item_download_list is None:
+                self.process_channel_errors += 1
+                sync_encountered_problem = True
+                self.log.warning(f'{channel["Name"]}> FAILED to get list of videos from YT, increasing error counter to {self.process_channel_errors}')
+
+            elif item_download_list:
                 self.log.info(f'{channel["Name"]}> Downloading video list')
-                self.download_items(item_download_list, channel_folder_path, channel)
-                self.log.info(f'{channel["Name"]}> Finished downloading videos for channel')
+                if not self.download_items(item_download_list, channel_folder_path, channel):
+                    self.process_channel_errors += 1
+                    sync_encountered_problem = True
+                    self.log.warning(f'{channel["Name"]}> FAILED downloading videos for channel, increasing error counter to {self.process_channel_errors}')
+
+                else:
+                    self.log.info(f'{channel["Name"]}> Finished downloading videos for channel')
+
+                self.media_server_scan_req_flag = True
+
             else:
                 self.log.warning(f'{channel["Name"]}> No videos to download')
 
             self.log.info(f'{channel["Name"]}> Clearing old files')
             self.cleanup_old_files(channel_folder_path, channel)
-            self.log.info(f'{channel["Name"]}> Finished Clearing old files')
-
-            self.log.info(f'{channel["Name"]}> Counting Files')
+            self.log.info(f'{channel["Name"]}> Finished clearing old files, recounting files...')
             channel["Item_Count"] = self.count_media_files(channel_folder_path)
-            self.log.info(f'{channel["Name"]}> Finished Counting Files')
 
+            # TODO: Update Last_Synced only on successful sync - right now the logic is not really ideal, when Sync
+            #       starts it changes Last_Synced to "In Progress" and saves it to the channel_list.json... So we really
+            #       *have* to set it like this for now. But I want to fix this...
             channel["Last_Synced"] = datetime.datetime.now().strftime("%d-%m-%y %H:%M:%S")
-            self.log.info(f'{channel["Name"]}> Completed processing')
+
+            if not sync_encountered_problem:
+                self.log.info(f'{channel["Name"]}> Channel processed')
+            else:
+                self.log.warning(f'{channel["Name"]}> Channel processed with some problems (check logs).')
+
 
         except Exception as e:
             self.log.error(f'{channel["Name"]}> Error processing channel: {str(e)}')
@@ -806,9 +889,7 @@ class DataHandler:
 
     def manual_start(self):
         if not self.task_thread_started:
-            self.task_thread_started = True
             self.log.warning("Manual sync triggered.")
-            socketio.emit("sync_state_changed", { "Sync_State": "run" })
             self.task_thread = threading.Thread(target=self.master_queue, daemon=True)
             self.task_thread.start()
         else:
@@ -818,7 +899,7 @@ class DataHandler:
 
 
 app = Flask(__name__)
-app.secret_key = "secret_key"
+app.secret_key = os.urandom(12).hex()
 socketio = SocketIO(app)
 data_handler = DataHandler()
 
