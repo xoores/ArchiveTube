@@ -141,6 +141,10 @@ class DataHandler:
 
                     synced_state = channel.get("Last_Synced", "Never")
                     synced_state = "Incomplete" if synced_state in ["In Progress", "Failed", "Queued"] else synced_state
+                    import_Search_Limit = channel.get("Search_Limit", 0)
+                    if import_Search_Limit == "":
+                        import_Search_Limit = 0
+
                     full_channel_data = {
                         "Id": idx,
                         "Name": channel.get("Name", ""),
@@ -152,7 +156,7 @@ class DataHandler:
                         "Item_Count": int(channel.get("Item_Count", 0)),
                         "Filter_Title_Text": channel.get("Filter_Title_Text", ""),
                         "Negate_Filter": bool(channel.get("Negate_Filter", False)),
-                        "Search_Limit": int(channel.get("Search_Limit", 0)),
+                        "Search_Limit": int(import_Search_Limit),
                         "Live_Rule": channel.get("Live_Rule", "Ignore"),
                         "Audio_Only": bool(channel.get("Audio_Only", False)),
                         "Use_SponsorBlock": bool(channel.get("Use_SponsorBlock", True)),

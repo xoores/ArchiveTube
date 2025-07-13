@@ -42,7 +42,7 @@ Downloading from YouTube does require external connection, however my target is 
 
 ```yaml
 services:
-  channeltube:
+  archivetube:
     image: xoores/archivetube:latest
     container_name: archivetube
     volumes:
