@@ -288,10 +288,11 @@ class DataHandler:
                 current_time = time.time()
                 age_in_hours = (current_time - video_timestamp) / 3600
 
-                if cutoff_date > -1 and video_upload_date < cutoff_date:
-                    self.log.info(f"{channel["Name"]}|{video["id"]}> Ignoring video as it is older than the cut-off {cutoff_date}.")
-                    self.log.info(f"{channel["Name"]}|{video["id"]}> No more videos in date range")
-                    break
+                if cutoff_date > -1:
+                    if video_upload_date < cutoff_date:
+                        self.log.info(f"{channel["Name"]}|{video["id"]}> Ignoring video as it is older than the cut-off {cutoff_date}.")
+                        self.log.info(f"{channel["Name"]}|{video["id"]}> No more videos in date range")
+                        break
 
                 if age_in_hours < self.defer_hours and video["live_status"] is None:
                     self.log.info(f"{channel["Name"]}|{video["id"]}> Video is {age_in_hours:.2f} hours old. Waiting until it's older than {self.defer_hours} hours.")
