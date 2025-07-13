@@ -7,28 +7,31 @@
   <link rel="icon" type="image/x-icon" href="{{url_for('static', filename='logo.png')}}">
   <link rel="stylesheet" href="{{url_for('static', filename='style.css')}}">
   <!-- Bootstrap CSS -->
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"
+  <link href="{{url_for('static',filename='ext/bootstrap-5.3.2.min.css')}}" rel="stylesheet"
     integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN" crossorigin="anonymous">
   <!-- Bootstrap JS -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.2/js/bootstrap.min.js"
+  <script src="{{url_for('static',filename='ext/bootstrap-5.3.2.min.js')}}"
     integrity="sha512-WW8/jxkELe2CAiE4LvQfwm1rajOS8PHasCCx+knHG0gBHt8EXxS6T6tJRTGuDQVnluuAvMxWF4j8SNFDKceLFg=="
     crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <!-- Font Awesome -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css"
+  <link rel="stylesheet" href="{{url_for('static',filename='ext/font-awesome-6.4.2.min.css')}}"
     integrity="sha512-z3gLpd7yknf1YoNbCzqRKc4qyor8gaKU1qmn+CShxbuBusANI9QpRohGBreCFkKxLhei6S9CQXFEbbKuqLg0DA=="
     crossorigin="anonymous" referrerpolicy="no-referrer">
   <!-- Socket IO -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"
+  <script src="{{url_for('static',filename='ext/socket.io-4.7.2.js')}}"
     integrity="sha512-zoJXRvW2gC8Z0Xo3lBbao5+AS3g6YWr5ztKqaicua11xHo+AvE1b0lT9ODgrHTmNUxeCw0Ry4BGRYZfXu70weg=="
     crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <title>ChannelTube</title>
+  <title>ArchiveTube</title>
 </head>
 
 <body class="bg-secondary-subtle">
   <div class="container-fluid bg-dark">
     <div class="top-bar d-flex justify-content-between align-items-center">
-      <img id="logo" src="{{url_for('static',filename='channeltube.png')}}" alt="logo">
-      <h1 class="title text-center text-light flex-grow-1">ChannelTube</h1>
+      <img id="logo" src="{{url_for('static',filename='archivetube.png')}}" alt="logo">
+      <h1 class="title text-center text-light flex-grow-1">ArchiveTube</h1>
+      <button class="btn btn-link text-light" id="sync-status-button">
+        <i class="fa fa-circle-stop fa-2x"  id="sync-status-button-icon" title="Synchronization not running. Click to start manually"></i>
+      </button>
       <button class="btn btn-link text-light" id="settings-button" data-bs-toggle="modal"
         data-bs-target="#config-modal">
         <i class="fa fa-gear fa-2x"></i>
@@ -51,26 +54,42 @@
             <input type="text" class="form-control border-secondary-subtle" id="sync-start-times"
               placeholder="Enter Hour in 24hr format (use , for multiple hours)">
           </div>
-          <div class="form-group-modal my-4">
-            <label for="media-server-addresses">Media Server Addresses:</label>
-            <input type="text" class="form-control border-secondary-subtle" id="media-server-addresses"
-              placeholder="Enter Media Server Address">
-          </div>
-          <div class="form-group-modal my-4">
-            <label for="media-server-tokens">Media Server Tokens:</label>
-            <input type="text" class="form-control border-secondary-subtle" id="media-server-tokens"
-              placeholder="Enter Media Server Tokens">
-          </div>
-          <div class="form-group-modal">
-            <label for="media-server-library-name">Media Server Library Name:</label>
-            <input type="text" class="form-control border-secondary-subtle" id="media-server-library-name"
-              placeholder="Enter Media Server Library Name">
-          </div>
+
+          <div class="form-group my-3">
+            <fieldset class="row">
+            <legend>Media server:</legend>
+                    <!--
+                  <div class="col-4">
+                    <label for="download-days">Days to Sync:</label>
+                    <input type="number" class="form-control border-secondary-subtle" min="-1" id="download-days"
+                           value="" aria-describedby="download-days-help">
+                    <div class="form-text" id="download-days-help">-1 = whole channel</div>
+                  </div> -->
+
+              <div class="form-group-modal">
+                <label for="media-server-addresses">Addresses:</label>
+                <input type="text" class="form-control border-secondary-subtle" id="media-server-addresses"
+                  placeholder="Plex: http://192.168.1.2:32400, Jellyfin: http://192.168.1.2:8096">
+              </div>
+              <div class="form-group-modal my-3">
+                <label for="media-server-tokens">Tokens:</label>
+                <input type="text" class="form-control border-secondary-subtle" id="media-server-tokens"
+                  placeholder="Plex: abc, Jellyfin: xyz">
+              </div>
+              <div class="form-group-modal">
+                <label for="media-server-library-name">Library Name:</label>
+                <input type="text" class="form-control border-secondary-subtle" id="media-server-library-name"
+                  placeholder="Enter Media Server Library Name">
+              </div>
+            </fieldset>
+         </div>
+
+
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
           <button type="button" id="save-changes-button" class="btn btn-primary">Save</button>
-          <button type="button" id="manual-start-button" class="btn btn-info">Manual Start</button>
+          <!-- <button type="button" id="manual-start-button" class="btn btn-info">Manual Start</button> -->
           <i class="fa fa-sun"></i>
           <div class="form-check form-switch">
             <input class="form-check-input rounded" type="checkbox" id="themeSwitch">
@@ -107,8 +126,9 @@
       <td class="channel-last-synced"></td>
       <td class="text-center channel-item-count"></td>
       <td class="text-center">
-        <button class="btn btn-sm btn-primary custom-button-width edit-button">Edit</button>
-        <button class="btn btn-sm btn-secondary custom-button-width remove-button">Remove</button>
+        <button class="btn btn-sm btn-primary custom-button-width edit-button"><i class="fa-solid fa-pen"></i></button>
+        <button class="btn btn-sm btn-secondary custom-button-width pause-button"><i class="pause-btn-icon fa-solid"></i></button>
+        <button class="btn btn-sm btn-outline-danger custom-button-width remove-button"><i class="fa-solid fa-trash"></i></button>
       </td>
     </tr>
   </template>
@@ -125,69 +145,97 @@
           <div class="modal-body py-1">
             <form>
               <div class="form-group">
-                <label for="channel-name">Channel Name:</label>
-                <input type="text" class="form-control border-secondary-subtle" id="channel-name" value="">
+                  <label class="sr-only" for="channel-name">Name:</label>
+
+                 <div class="input-group">
+                    <div class="input-group-prepend">
+                      <span class="input-group-text" style="height:100%"><i class="fa-solid fa-tag fa-fw"></i></span>
+                    </div>
+                    <input type="text" class="form-control border-secondary-subtle" id="channel-name" value="">
+                  </div>
               </div>
+
               <div class="form-group my-3">
-                <label for="channel-link">Channel Link:</label>
-                <input type="text" class="form-control border-secondary-subtle" id="channel-link" value="">
+                  <label class="sr-only" for="channel-link">URL</label>
+
+                 <div class="input-group">
+                    <div class="input-group-prepend">
+                      <span class="input-group-text" style="height:100%"><i class="fa-solid fa-link fa-fw"></i></span>
+                    </div>
+                    <input type="text" class="form-control" id="channel-link" value="">
+                  </div>
               </div>
+                <!--
               <fieldset class="form-group mt-3">
                 <legend class="m-0 p-0 col-form-label">Media Type:</legend>
                 <div class="row">
                   <div class="d-flex align-items-center mt-1">
                     <div class="form-check me-3">
-                      <input class="form-check-input" type="radio" name="media-type-selector" id="video-option"
-                        value="Video">
+                      <input class="form-check-input" type="radio" name="media-type-selector" id="video-option" value="Video">
                       <label class="form-check-label" for="video-option">Audio & Video</label>
                     </div>
                     <div class="form-check me-3">
-                      <input class="form-check-input" type="radio" name="media-type-selector" id="audio-option"
-                        value="Audio">
+                      <input class="form-check-input" type="radio" name="media-type-selector" id="audio-option" value="Audio">
                       <label class="form-check-label" for="audio-option">Audio Only</label>
                     </div>
                   </div>
                 </div>
               </fieldset>
+              -->
               <div class="form-group my-3">
-                <div class="row">
-                  <div class="col-6">
+                <fieldset class="row">
+                <legend>Synchronization:</legend>
+                  <div class="col-4">
                     <label for="download-days">Days to Sync:</label>
-                    <input type="number" class="form-control border-secondary-subtle" min="0" id="download-days"
-                      value="">
+                    <input type="number" class="form-control border-secondary-subtle" min="-1" id="download-days"
+                           value="" aria-describedby="download-days-help">
+                    <div class="form-text" id="download-days-help">-1 = whole channel</div>
                   </div>
-                  <div class="col-6">
+                  <div class="col-4">
                     <label for="keep-days">Days to Keep:</label>
                     <input type="number" class="form-control border-secondary-subtle" min="-1" id="keep-days"
-                      placeholder="Use -1 for Indefinite" value="">
+                            placeholder="" value="" aria-describedby="keep-days-help">
+                    <div class="form-text" id="keep-days-help">-1 = Indefinite</div>
                   </div>
-                </div>
+                  <div class="col-4">
+                    <label for="keep-days">Search Limit:</label>
+                    <input type="number" class="form-control border-secondary-subtle" min="0" id="search-limit"
+                           value="0" aria-describedby="search-limit-help">
+                    <div class="form-text" id="search-limit-help">0 = No limit</div>
+                  </div>
+              </fieldset>
               </div>
               <div class="form-group my-3">
                 <div class="row">
-                  <div class="col-4">
-                    <label for="search-limit">Search Limit:</label>
-                    <input type="number" class="form-control border-secondary-subtle" id="search-limit" value="">
-                  </div>
                   <fieldset class="col-8">
-                    <legend class="col-form-label p-0">Rule for Live Stream:</legend>
+                    <legend class="col-form-label p-0" style="float:left">Live Streams:</legend>
+                      <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="radio" name="live-rule-selector" id="ignore-rule" value="Ignore">
+                        <label class="form-check-label" for="ignore-rule">Ignore</label>
+                      </div>
+                      <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="radio" name="live-rule-selector" id="allow-rule" value="Allow">
+                        <label class="form-check-label" for="allow-rule">Allow</label>
+                      </div>
+                      <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="radio" name="live-rule-selector" id="only-rule" value="Only">
+                        <label class="form-check-label" for="only-rule">Only</label>
+                      </div>
+                      <!--
                     <div class="d-flex align-items-center pt-1 mt-1">
                       <div class="form-check me-3">
-                        <input class="form-check-input" type="radio" name="live-rule-selector" id="ignore-rule"
-                          value="Ignore">
+                        <input class="form-check-input" type="radio" name="live-rule-selector" id="ignore-rule" value="Ignore">
                         <label class="form-check-label" for="ignore-rule">Ignore</label>
                       </div>
                       <div class="form-check me-3">
-                        <input class="form-check-input" type="radio" name="live-rule-selector" id="allow-rule"
-                          value="Allow">
+                        <input class="form-check-input" type="radio" name="live-rule-selector" id="allow-rule" value="Allow">
                         <label class="form-check-label" for="allow-rule">Allow</label>
                       </div>
                       <div class="form-check">
-                        <input class="form-check-input" type="radio" name="live-rule-selector" id="only-rule"
-                          value="Only">
+                        <input class="form-check-input" type="radio" name="live-rule-selector" id="only-rule" value="Only">
                         <label class="form-check-label" for="only-rule">Only</label>
                       </div>
-                    </div>
+                    </div> -->
                   </fieldset>
                 </div>
               </div>
@@ -200,9 +248,35 @@
                     <label class="form-check-label" for="negate-filter">Negate</label>
                   </div>
                 </div>
-                <p id="filter-text-description" class="m-0 text-secondary">
+                <p id="filter-text-description" class="form-text">
                   Only get videos with this text in the title.
                 </p>
+              </div>
+
+              <div class="form-group my-3">
+                  <fieldset class="col">
+                    <legend>Misc:</legend>
+                    <div class="form-check form-switch">
+                      <input class="form-check-input" type="checkbox" id="set-remove-sponsored">
+                      <label class="form-check-label" for="set-remove-sponsored">Remove sponsored segments with SponsorBlock</label>
+                    </div>
+                    <div class="form-check form-switch">
+                      <input class="form-check-input" type="checkbox" id="set-best-quality">
+                      <label class="form-check-label" for="set-best-quality" data-toggle="tooltip" data-placement="left" title="Override any format preferences set by ENV variables and pick the best audio and best video format available. Useful for channel archivation.">Best quality available</label>
+                    </div>
+                    <div class="form-check form-switch">
+                      <input class="form-check-input" type="checkbox" id="set-audio-only">
+                      <label class="form-check-label" for="set-audio-only" data-toggle="tooltip" data-placement="left" title="Download audio+video or audio-only">Audio only</label>
+                    </div>
+                    <div class="form-check form-switch">
+                      <input class="form-check-input" type="checkbox" id="set-write-info-json">
+                      <label class="form-check-label" for="set-write-info-json" data-toggle="tooltip" data-placement="left" title="Write metadata to .info.json file (placed in the same directory as target file)">Write metadata to .info.json</label>
+                    </div>
+                    <div class="form-check form-switch">
+                      <input class="form-check-input" type="checkbox" id="set-mtime">
+                      <label class="form-check-label" for="set-mtime" data-toggle="tooltip" data-placement="left" title="Use the Last-modified header to set the target file modification time">Set mtime for downloaded video</label>
+                    </div>
+                  </fieldset>
               </div>
             </form>
           </div>

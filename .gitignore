@@ -1,0 +1,7 @@
+.idea/
+.venv/
+audio_downloads/
+config/
+downloads/
+
+__pycache__/

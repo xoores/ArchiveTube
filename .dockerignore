@@ -1,0 +1,12 @@
+.idea/
+.venv/
+.git/
+.github/
+audio_downloads/
+config/
+downloads/
+
+**/__pycache__/
+
+.gitignore
+.dockerignore

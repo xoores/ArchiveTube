@@ -1,24 +1,20 @@
-FROM python:3.12-alpine
+FROM python:3.13-alpine
 
-# Set build arguments
 ARG RELEASE_VERSION
 ENV RELEASE_VERSION=${RELEASE_VERSION}
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV PIP_NO_CACHE_DIR=1
 
-# Install ffmpeg and su-exec
 RUN apk update && apk add --no-cache ffmpeg su-exec
 
-# Create directories and set permissions
-COPY . /channeltube
-WORKDIR /channeltube
+COPY . /archivetube
 
-# Install requirements
-RUN pip install --no-cache-dir -r requirements.txt
+WORKDIR /archivetube
 
-# Make the script executable
-RUN chmod +x thewicklowwolf-init.sh
+RUN pip install -r requirements.txt
+RUN chmod +x init.sh
 
-# Expose port
 EXPOSE 5000
 
-# Start the app
-ENTRYPOINT ["./thewicklowwolf-init.sh"]
+ENTRYPOINT ["./init.sh"]

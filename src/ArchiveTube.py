@@ -1,10 +1,13 @@
 import logging
+import pprint
 import re
 import os
 import json
 import time
 import datetime
 import threading
+
+from gevent import monkey
 from mutagen.mp4 import MP4
 import concurrent.futures
 from flask import Flask, render_template
@@ -14,28 +17,44 @@ from plexapi.server import PlexServer
 import requests
 import tempfile
 
+monkey.patch_all()
+
 PERMANENT_RETENTION = -1
-VIDEO_EXTENSIONS = {".mp4"}
+VIDEO_EXTENSIONS = {".mp4", ".mkv"}
 AUDIO_EXTENSIONS = {".m4a"}
 MEDIA_FILE_EXTENSIONS = VIDEO_EXTENSIONS.union(AUDIO_EXTENSIONS)
+
+
+def video_duration_filter( info, *, incomplete ):
+    """
+    Match & download only videos that are longer than specified duration. Also matches videos with unknown duration
+    """
+    duration = info.get('duration')
+    if duration and duration < 90:
+        return 'The video is too short'
+    return None
 
 
 class DataHandler:
     def __init__(self):
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-        self.general_logger = logging.getLogger()
+        self.log = logging.getLogger()
+
+        self.task_thread = None
+        self.task_thread_started = False
 
         app_name_text = os.path.basename(__file__).replace(".py", "")
         release_version = os.environ.get("RELEASE_VERSION", "unknown")
-        self.general_logger.warning(f"{'*' * 50}\n")
-        self.general_logger.warning(f"{app_name_text} Version: {release_version}\n")
-        self.general_logger.warning(f"{'*' * 50}")
+        self.log.warning(f"{'*' * 50}\n")
+        self.log.warning(f"{app_name_text} Version: {release_version}\n")
+        self.log.warning(f"{'*' * 50}")
 
+        self.download_progress_report_perc = 0
         self.config_folder = "config"
         self.download_folder = "downloads"
         self.audio_download_folder = "audio_downloads"
-        self.media_server_addresses = "Plex: http://192.168.1.2:32400, Jellyfin: http://192.168.1.2:8096"
-        self.media_server_tokens = "Plex: abc, Jellyfin: xyz"
+        self.media_server_addresses = ""
+        self.media_server_tokens = ""
         self.media_server_library_name = "YouTube"
         self.media_server_scan_req_flag = False
         self.video_format_id = os.environ.get("video_format_id", "137")
@@ -47,8 +66,14 @@ class DataHandler:
         self.subtitles = os.environ.get("subtitles", "none").lower()
         self.subtitles = "none" if self.subtitles not in ("none", "embed", "external") else self.subtitles
         self.subtitle_languages = os.environ.get("subtitle_languages", "en").split(",")
-        self.include_id_in_filename = os.environ.get("include_id_in_filename", "false").lower() == "true"
+        self.include_id_in_filename = True
         self.verbose_logs = os.environ.get("verbose_logs", "false").lower() == "true"
+        self.ytd_extra_parameters = {
+            "ffmpeg_location": "/usr/bin/ffmpeg",
+            "verbose": self.verbose_logs,
+            "logger": self.log,
+            "quiet": True,
+        }
 
         os.makedirs(self.config_folder, exist_ok=True)
         os.makedirs(self.download_folder, exist_ok=True)
@@ -82,7 +107,7 @@ class DataHandler:
             self.media_server_library_name = ret["media_server_library_name"]
 
         except Exception as e:
-            self.general_logger.error(f"Error Loading Config: {str(e)}")
+            self.log.error(f"Error Loading Config: {str(e)}")
 
     def save_settings_to_file(self):
         try:
@@ -99,39 +124,55 @@ class DataHandler:
                 )
 
         except Exception as e:
-            self.general_logger.error(f"Error Saving Config: {str(e)}")
+            self.log.error(f"Error Saving Config: {str(e)}")
 
         else:
-            self.general_logger.warning(f"Settings Saved.")
+            self.log.warning(f"Settings Saved.")
 
     def load_channel_list_from_file(self):
         try:
             with open(self.channel_list_config_file, "r") as json_file:
                 channels = json.load(json_file)
-            sorted_channels = sorted(channels, key=lambda channel: channel.get("Name", "").lower())
+            sorted_channels = sorted(channels, key=lambda c: c.get("Name", "").lower())
 
+            self.log.info(f"load_channel_list_from_file> Loading {len(sorted_channels)} channels from {self.channel_list_config_file}")
             for idx, channel in enumerate(sorted_channels):
-                synced_state = channel.get("Last_Synced", "Never")
-                synced_state = "Incomplete" if synced_state in ["In Progress", "Failed", "Queued"] else synced_state
-                full_channel_data = {
-                    "Id": idx,
-                    "Name": channel.get("Name", ""),
-                    "Link": channel.get("Link", ""),
-                    "DL_Days": channel.get("DL_Days", 0),
-                    "Keep_Days": channel.get("Keep_Days", 0),
-                    "Last_Synced": synced_state,
-                    "Item_Count": channel.get("Item_Count", 0),
-                    "Filter_Title_Text": channel.get("Filter_Title_Text", ""),
-                    "Negate_Filter": channel.get("Negate_Filter", False),
-                    "Media_Type": channel.get("Media_Type", "Video"),
-                    "Search_Limit": channel.get("Search_Limit", ""),
-                    "Live_Rule": channel.get("Live_Rule", "Ignore"),
-                }
+                try:
 
-                self.req_channel_list.append(full_channel_data)
+                    synced_state = channel.get("Last_Synced", "Never")
+                    synced_state = "Incomplete" if synced_state in ["In Progress", "Failed", "Queued"] else synced_state
+                    full_channel_data = {
+                        "Id": idx,
+                        "Name": channel.get("Name", ""),
+                        "Link": channel.get("Link", ""),
+                        "Paused": bool(channel.get("Paused", False)),
+                        "DL_Days": int(channel.get("DL_Days", 0)),
+                        "Keep_Days": int(channel.get("Keep_Days", 0)),
+                        "Last_Synced": synced_state,
+                        "Item_Count": int(channel.get("Item_Count", 0)),
+                        "Filter_Title_Text": channel.get("Filter_Title_Text", ""),
+                        "Negate_Filter": bool(channel.get("Negate_Filter", False)),
+                        "Search_Limit": int(channel.get("Search_Limit", 0)),
+                        "Live_Rule": channel.get("Live_Rule", "Ignore"),
+                        "Audio_Only": bool(channel.get("Audio_Only", False)),
+                        "Use_SponsorBlock": bool(channel.get("Use_SponsorBlock", True)),
+                        "Use_Best_Quality": bool(channel.get("Use_Best_Quality", False)),
+                        "Write_Info_Json": bool(channel.get("Write_Info_Json", True)),
+                        "Set_Mtime": bool(channel.get("Set_Mtime", True)),
+                    }
+
+                    full_channel_data["Item_Count"] = self.count_media_files_for_channel( full_channel_data )
+                    if full_channel_data["Item_Count"] == -1:
+                        full_channel_data["Last_Synced"] = "Never"
+                        full_channel_data["Item_Count"] = 0
+
+                    self.req_channel_list.append(full_channel_data)
+                    self.log.info(f"load_channel_list_from_file> Channel '{full_channel_data["Name"]}' loaded")
+                except ValueError as e:
+                    self.log.error(f"load_channel_list_from_file> Failed to load channel ID={idx}: {str(e)}")
 
         except Exception as e:
-            self.general_logger.error(f"Error Loading Channels: {str(e)}")
+            self.log.error(f"load_channel_list_from_file> Error Loading Channels: {str(e)}")
 
     def save_channel_list_to_file(self):
         try:
@@ -139,26 +180,26 @@ class DataHandler:
                 json.dump(self.req_channel_list, json_file, indent=4)
 
         except Exception as e:
-            self.general_logger.error(f"Error Saving Channels: {str(e)}")
+            self.log.error(f"Error Saving Channels: {str(e)}")
 
     def schedule_checker(self):
-        self.general_logger.warning("Starting periodic checks every 10 minutes to monitor sync start times.")
-        self.general_logger.warning(f"Current scheduled hours to start sync (in 24-hour format): {self.sync_start_times}")
+        self.log.info("Starting periodic checks every 10 minutes to monitor sync start times.")
+        self.log.info(f"Current scheduled hours to start sync (in 24-hour format): {self.sync_start_times}")
         while True:
             current_time = datetime.datetime.now()
             within_sync_window = current_time.hour in self.sync_start_times
 
             if within_sync_window:
-                self.general_logger.warning(f"Time to Start Sync - as current hour: {current_time.hour} in schedule {str(self.sync_start_times)}")
+                self.log.info(f"Time to Start Sync - as current hour: {current_time.hour} in schedule {str(self.sync_start_times)}")
                 self.master_queue()
 
                 current_time = datetime.datetime.now()
                 next_hour = (current_time + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=1)
                 sleep_seconds = (next_hour - current_time).total_seconds()
 
-                self.general_logger.warning(f"Sync Complete - Sleeping for {int(sleep_seconds)} seconds until {next_hour.time()}")
+                self.log.info(f"Sync Complete - Sleeping for {int(sleep_seconds)} seconds until {next_hour.time()}")
                 time.sleep(sleep_seconds)
-                self.general_logger.warning(f"Checking sync schedule every 10 minutes: {str(self.sync_start_times)}")
+                self.log.info(f"Checking sync schedule every 10 minutes: {str(self.sync_start_times)}")
 
             else:
                 time.sleep(600)
@@ -172,80 +213,67 @@ class DataHandler:
         ydl_opts = {
             "quiet": True,
             "extract_flat": True,
-            "ffmpeg_location": "/usr/bin/ffmpeg",
-            "verbose": self.verbose_logs,
+            "match_filter": video_duration_filter,
         }
-        if search_limit:
+        ydl_opts |= self.ytd_extra_parameters
+
+        if search_limit > 0:
             ydl_opts["playlist_items"] = f"1-{search_limit}"
         ydl = yt_dlp.YoutubeDL(ydl_opts)
 
-        if "playlist?list" in channel_link.lower():
-            playlist = ydl.extract_info(channel_link, download=False)
-            channel_title = playlist.get("title")
-            channel_name = playlist.get("channel")
-            channel_id = playlist.get("channel_id")
-            self.general_logger.warning(f"Playlist Title: {channel_title} from Channel: {channel_name} and Channel ID: {channel_id}")
+        playlist = ydl.extract_info(channel_link, download=False)
+        channel_title = playlist.get("title")
+        channel_id = playlist.get("channel_id")
+        self.log.info(f"{channel["Name"]}> CHANNEL_ID={channel_id}  VIDEOS={len(playlist["entries"])}  TITLE='{channel_title}' ")
 
-        else:
-            channel_info = ydl.extract_info(channel_link, download=False)
-            channel_id = channel_info.get("channel_id")
-            channel_title = channel_info.get("title")
-
+        if "playlist?list" not in channel_link.lower():
             if not channel_id:
                 raise Exception("No Channel ID")
             if not channel_title:
                 raise Exception("No Channel Title")
 
-            self.general_logger.warning(f"Channel Title: {channel_title} and Channel ID: {channel_id}")
-
             if channel["Live_Rule"] == "Only":
-                self.general_logger.warning(f"Getting list of live videos for channel: {channel_title}")
+                self.log.info(f"{channel["Name"]}> Getting list of live videos for this channel")
                 playlist_url = f"{channel_link}/streams"
             else:
-                self.general_logger.warning(f"Getting list of videos for channel: {channel_title}")
+                self.log.info(f"{channel["Name"]}> Getting list of videos")
                 playlist_url = f"https://www.youtube.com/playlist?list=UU{channel_id[2:]}"
 
             playlist = ydl.extract_info(playlist_url, download=False)
 
         today = datetime.datetime.now()
-        cutoff_date = today - datetime.timedelta(days=days_to_retrieve)
+        cutoff_date = -1 if days_to_retrieve == -1 else today - datetime.timedelta(days=days_to_retrieve)
 
+        fails = 0
         for video in playlist["entries"]:
             try:
                 video_title = f'{video["title"]} [{video["id"]}]' if self.include_id_in_filename else video["title"]
-                video_link = video["url"]
                 duration = 0 if not video["duration"] else video["duration"]
-                youtube_video_id = video["id"]
-                live_status = video["live_status"]
 
                 if channel["Live_Rule"] == "Only":
                     if len(video_to_download_list):
-                        self.general_logger.warning(f"Live video found for channel: {channel_title}")
-                        self.general_logger.warning(f"Downloading first live video and ignoring everything else for channel: {channel_title}")
+                        self.log.info(f"{channel["Name"]}|{video["id"]}> Live video found")
+                        self.log.info(f"{channel["Name"]}|{video["id"]}> Downloading only first live video")
                         break
 
-                    if live_status == "is_upcoming":
-                        self.general_logger.warning(f"Skipping upcoming live video: {video_title} - {video_link}")
+                    if video["live_status"] == "is_upcoming":
+                        self.log.info(f"{channel["Name"]}|{video["id"]}> Skipping upcoming live video: {video_title}")
                         continue
 
-                    if not (live_status == "is_live" or live_status == "post_live"):
-                        self.general_logger.warning(f"No active live videos for channel: {channel_title}")
+                    if video["live_status"] not in ("is_live", "post_live"):
+                        self.log.info(f"{channel["Name"]}|{video["id"]}> We only want active live videos and none were found")
                         break
 
-                if channel["Live_Rule"] == "Ignore" and live_status is not None:
-                    self.general_logger.warning(f"Ignoring live video: {video_title} - {video_link}")
+                if channel["Live_Rule"] == "Ignore" and video["live_status"] is not None:
+                    self.log.info(f"{channel["Name"]}|{video["id"]}> Ignoring live video: {video_title}")
                     continue
 
-                if duration <= 180 and live_status is None:
-                    self.general_logger.warning(f"Ignoring short video: {video_title} - {video_link}")
+                if video["id"] in current_channel_files["id_list"] or video_title in current_channel_files["filename_list"]:
+                    self.log.info(f"{channel["Name"]}|{video["id"]}> File for video '{video_title}' already in folder.")
                     continue
 
-                if youtube_video_id in current_channel_files["id_list"] or video_title in current_channel_files["filename_list"]:
-                    self.general_logger.warning(f"File for video: {video_title} already in folder.")
-                    continue
-
-                self.general_logger.warning(f"Extracting info for: {video_title} -> Duration: {duration} seconds")
-                video_extracted_info = ydl.extract_info(video_link, download=False)
+                self.log.info(f"{channel["Name"]}|{video["id"]}> Extracting info for '{video_title}' ({duration}s long)")
+                video_extracted_info = ydl.extract_info(video["url"], download=False)
 
                 video_upload_date_raw = video_extracted_info["upload_date"]
                 video_upload_date = datetime.datetime.strptime(video_upload_date_raw, "%Y%m%d")
@@ -254,35 +282,47 @@ class DataHandler:
                 current_time = time.time()
                 age_in_hours = (current_time - video_timestamp) / 3600
 
-                if video_upload_date < cutoff_date:
-                    self.general_logger.warning(f"Ignoring video: {video_title} as it is older than the cut-off {cutoff_date}.")
-                    self.general_logger.warning("No more videos in date range")
+                if cutoff_date > -1 and video_upload_date < cutoff_date:
+                    self.log.info(f"{channel["Name"]}|{video["id"]}> Ignoring video as it is older than the cut-off {cutoff_date}.")
+                    self.log.info(f"{channel["Name"]}|{video["id"]}> No more videos in date range")
                     break
 
-                if age_in_hours < self.defer_hours and live_status is None:
-                    self.general_logger.warning(f"Video: {video_title} is {age_in_hours:.2f} hours old. Waiting until it's older than {self.defer_hours} hours.")
+                if age_in_hours < self.defer_hours and video["live_status"] is None:
+                    self.log.info(f"{channel["Name"]}|{video["id"]}> Video is {age_in_hours:.2f} hours old. Waiting until it's older than {self.defer_hours} hours.")
                     continue
 
                 if channel.get("Filter_Title_Text"):
                     if channel["Negate_Filter"] and channel["Filter_Title_Text"].lower() in video_title.lower():
-                        self.general_logger.warning(f'Skipped video: {video_title} as it contains the filter text: {channel["Filter_Title_Text"]}')
+                        self.log.info(f"{channel["Name"]}|{video["id"]}> Skipped video as it contains the filter text: {channel["Filter_Title_Text"]}")
                         continue
 
                     if not channel["Negate_Filter"] and channel["Filter_Title_Text"].lower() not in video_title.lower():
-                        self.general_logger.warning(f'Skipped video: {video_title} as it does not contain the filter text: {channel["Filter_Title_Text"]}')
+                        self.log.info(f"{channel["Name"]}|{video["id"]}> Skipped video as it does not contain the filter text: {channel["Filter_Title_Text"]}")
                         continue
 
-                video_to_download_list.append({"title": video_title, "upload_date": video_upload_date, "link": video_link, "id": youtube_video_id, "channel_name": channel_title})
-                self.general_logger.warning(f"Added video to download list: {video_title} -> {video_link}")
-
+                video_to_download_list.append(
+                        {
+                            "title": video_title,
+                            "upload_date": video_upload_date,
+                            "link": video["url"],
+                            "id": video["id"],
+                            "channel_name": channel_title
+                        })
+                self.log.info(f"{channel["Name"]}|{video["id"]}> Added video to download list")
+                fails = 0
             except Exception as e:
-                self.general_logger.error(f"Error extracting details of {video_title}: {str(e)}")
+                fails += 1
+                self.log.error(f"{channel["Name"]}|{video["id"]}> Error extracting details: {str(e)}")
+
+                if fails > 3:
+                    self.log.error(f"{channel["Name"]}> Too many errors in succession, aborting! Please check logs.")
+                    break
 
         return video_to_download_list
 
     def get_list_of_files_from_channel_folder(self, channel_folder_path):
+        folder_info = { "id_list": [], "filename_list": [] }
         try:
-            folder_info = {"id_list": [], "filename_list": []}
             raw_directory_list = os.listdir(channel_folder_path)
             for filename in raw_directory_list:
                 file_path = os.path.join(channel_folder_path, filename)
@@ -291,21 +331,34 @@ class DataHandler:
 
                 try:
                     file_base_name, file_ext = os.path.splitext(filename)
-                    if file_ext.lower() in MEDIA_FILE_EXTENSIONS:
+                    id_in_title = re.search(r"\[([0-9A-Za-z_-]{10,}[048AEIMQUYcgkosw])\]", file_base_name)
+                    if id_in_title:
+                        folder_info["id_list"].append(id_in_title.group(1))
+
+                    elif file_ext.lower() in MEDIA_FILE_EXTENSIONS:
                         folder_info["filename_list"].append(file_base_name)
                         mp4_file = MP4(file_path)
                         embedded_video_id = mp4_file.get("\xa9cmt", [None])[0]
                         folder_info["id_list"].append(embedded_video_id)
 
                 except Exception as e:
-                    self.general_logger.error(f"No video ID present or cannot read it from metadata of {filename}: {e}")
+                    self.log.error(f"No video ID present or cannot read it from metadata of {filename}: {e}")
 
         except Exception as e:
-            self.general_logger.error(f"Error getting list of files for channel folder: {e}")
+            self.log.error(f"Error getting list of files for channel folder: {e}")
 
         finally:
-            self.general_logger.warning(f'Found {len(folder_info["filename_list"])} files and {len(folder_info["id_list"])} IDs in {channel_folder_path}.')
+            self.log.info(f'Found {len(folder_info["filename_list"])} files and {len(folder_info["id_list"])} IDs in {channel_folder_path}.')
             return folder_info
+
+    def count_media_files_for_channel( self, channel ):
+        channel_folder_path = self.audio_download_folder if channel["Audio_Only"] else self.download_folder
+        channel_folder_path = os.path.join(channel_folder_path, channel["Name"])
+
+        if not os.path.isdir(channel_folder_path) or channel["Name"] == "":
+            return -1
+
+        return self.count_media_files(channel_folder_path)
 
     def count_media_files(self, channel_folder_path):
         video_item_count = 0
@@ -323,16 +376,15 @@ class DataHandler:
             elif file_ext in AUDIO_EXTENSIONS:
                 audio_item_count += 1
 
-        self.general_logger.info(f"Found {video_item_count} video files and {audio_item_count} audio files in {channel_folder_path}.")
+        self.log.info(f"count_media_files|{channel_folder_path}> Found {video_item_count} video files and {audio_item_count} audio files")
 
         return video_item_count + audio_item_count
 
     def cleanup_old_files(self, channel_folder_path, channel):
         days_to_keep = channel["Keep_Days"]
-        selected_media_type = channel["Media_Type"]
 
         if days_to_keep == PERMANENT_RETENTION:
-            self.general_logger.warning(f"Skipping cleanup for channel: {channel['Name']} due to permanent retention policy.")
+            self.log.info(f"{channel['Name']}> Skipping cleanup due to permanent retention policy.")
             return
 
         current_datetime = datetime.datetime.now()
@@ -345,8 +397,8 @@ class DataHandler:
 
                 file_base_name, file_ext = os.path.splitext(filename.lower())
 
-                video_file_check = file_ext in VIDEO_EXTENSIONS and selected_media_type == "Video"
-                audio_file_check = file_ext in AUDIO_EXTENSIONS and selected_media_type == "Audio"
+                video_file_check = file_ext in VIDEO_EXTENSIONS and not channel["Audio_Only"]
+                audio_file_check = file_ext in AUDIO_EXTENSIONS and channel["Audio_Only"]
                 subtitle_file_check = file_ext == ".srt" and self.subtitles == "external"
 
                 if not (video_file_check or audio_file_check or subtitle_file_check):
@@ -357,13 +409,13 @@ class DataHandler:
 
                 if age > datetime.timedelta(days=days_to_keep):
                     os.remove(file_path)
-                    self.general_logger.warning(f"Deleted: {filename} as it is {age.days} days old.")
+                    self.log.info(f"{channel['Name']}> Deleted '{filename}' as it is {age.days} days old.")
                     self.media_server_scan_req_flag = True
                 else:
-                    self.general_logger.warning(f"File: {filename} is {age.days} days old, keeping file as not over {days_to_keep} days.")
+                    self.log.info(f"{channel['Name']}> File '{filename}' is {age.days} days old, keeping file as not over {days_to_keep} days.")
 
             except Exception as e:
-                self.general_logger.error(f"Error Cleaning Old Files: {filename} {str(e)}")
+                self.log.error(f"{channel['Name']}> Error Cleaning Old Files: {filename} {str(e)}")
 
     def get_file_modification_time(self, file_path, filename, file_ext):
         try:
@@ -375,47 +427,58 @@ class DataHandler:
             mpeg4_file_created_timestamp = mpeg4_file.get("\xa9day", [None])[0]
             if mpeg4_file_created_timestamp:
                 file_mtime = datetime.datetime.strptime(mpeg4_file_created_timestamp, "%Y-%m-%d %H:%M:%S")
-                self.general_logger.warning(f"Extracted datetime {file_mtime} from metadata of {filename}")
+                self.log.info(f"Extracted datetime {file_mtime} from metadata of {filename}")
                 return file_mtime
             else:
                 raise Exception("No timestamp found")
 
         except Exception as e:
-            self.general_logger.warning(f"Error extracting datetime from metadata for {filename}: {e}")
+            self.log.warning(f"Error extracting datetime from metadata for {filename}: {e}")
             file_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(file_path))
-            self.general_logger.warning(f"Using filesystem modified timestamp {file_mtime} for {filename}")
+            self.log.warning(f"Using filesystem modified timestamp {file_mtime} for {filename}")
             return file_mtime
 
     def download_items(self, item_list, channel_folder_path, channel):
         for item in item_list:
-            self.general_logger.warning(f'Starting download: {item["title"]}')
+            self.log.info(f"{channel["Name"]}|{item["id"]}> Processing download of '{item["title"]}'")
 
             try:
                 temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
                 link = item["link"]
                 cleaned_title = self.string_cleaner(item["title"])
-                selected_media_type = channel["Media_Type"]
-                post_processors = [
-                    {"key": "SponsorBlock", "categories": ["sponsor"]},
-                    {"key": "ModifyChapters", "remove_sponsor_segments": ["sponsor"]},
-                ]
+                #selected_media_type = channel["Media_Type"]
+                post_processors = []
 
-                if selected_media_type == "Video":
-                    selected_ext = "mp4"
-                    selected_format = f"{self.video_format_id}+{self.audio_format_id}/bestvideo[vcodec^={self.fallback_vcodec}]+bestaudio[acodec^={self.fallback_acodec}]/bestvideo+bestaudio/best"
-                    merge_output_format = selected_ext
+                if channel["Use_SponsorBlock"]:
+                    post_processors.append(
+                        [
+                            {"key": "SponsorBlock", "categories": ["sponsor"]},
+                            {"key": "ModifyChapters", "remove_sponsor_segments": ["sponsor"]}
+                        ]
+                    )
+
+                if channel["Audio_Only"]:
+                    if channel["Use_Best_Quality"]:
+                        # Format that contains video, and if it doesn't already have an audio stream, merge it with best audio-only format
+                        selected_format = f"bestaudio/best"
+                        merge_output_format = None
+                        post_processors.append( { "key": "FFmpegExtractAudio", "preferredquality": 0, } )
+                    else:
+                        selected_ext = "m4a"
+                        selected_format = f"{self.audio_format_id}/bestaudio[acodec^={self.fallback_acodec}]/bestaudio"
+                        merge_output_format = None
+                        post_processors.append( { "key": "FFmpegExtractAudio", "preferredcodec": selected_ext, "preferredquality": 0, } )
+
 
                 else:
-                    selected_ext = "m4a"
-                    selected_format = f"{self.audio_format_id}/bestaudio[acodec^={self.fallback_acodec}]/bestaudio"
-                    merge_output_format = None
-                    post_processors.append(
-                        {
-                            "key": "FFmpegExtractAudio",
-                            "preferredcodec": selected_ext,
-                            "preferredquality": 0,
-                        }
-                    )
+                    if channel["Use_Best_Quality"]:
+                        # Format that contains video, and if it doesn't already have an audio stream, merge it with best audio-only format
+                        selected_format = f"bestvideo*+bestaudio/best"
+                        merge_output_format = None
+                    else:
+                        selected_ext = "mp4"
+                        selected_format = f"{self.video_format_id}+{self.audio_format_id}/bestvideo[vcodec^={self.fallback_vcodec}]+bestaudio[acodec^={self.fallback_acodec}]/bestvideo+bestaudio/best"
+                        merge_output_format = selected_ext
 
                 post_processors.extend(
                     [
@@ -427,19 +490,17 @@ class DataHandler:
                 folder_and_filename = os.path.join(channel_folder_path, cleaned_title)
                 ydl_opts = {
                     "paths": {"home": channel_folder_path, "temp": temp_dir.name},
-                    "logger": self.general_logger,
-                    "ffmpeg_location": "/usr/bin/ffmpeg",
                     "format": selected_format,
                     "outtmpl": f"{cleaned_title}.%(ext)s",
-                    "quiet": True,
                     "writethumbnail": True,
                     "progress_hooks": [self.progress_callback],
                     "postprocessors": post_processors,
-                    "no_mtime": True,
+                    "no_mtime": channel["Set_Mtime"],
                     "live_from_start": True,
                     "extractor_args": {"youtubetab": {"skip": ["authcheck"]}},
-                    "verbose": self.verbose_logs,
+                    "writeinfojson": channel["Write_Info_Json"],
                 }
+                ydl_opts |= self.ytd_extra_parameters
 
                 if self.subtitles in ["embed", "external"]:
                     ydl_opts.update(
@@ -457,19 +518,21 @@ class DataHandler:
 
                 if merge_output_format:
                     ydl_opts["merge_output_format"] = merge_output_format
+
                 if self.cookies_path:
                     ydl_opts["cookiefile"] = self.cookies_path
 
                 yt_downloader = yt_dlp.YoutubeDL(ydl_opts)
-                self.general_logger.warning(f"yt_dlp -> Starting to download: {link}")
+                self.log.info(f"{channel["Name"]}|{item["id"]}> Download parameters: {ydl_opts}")
+                self.log.info(f"{channel["Name"]}|{item["id"]}> Starting yt-dlp")
+                self.download_progress_report_perc = 0
+                yt_ret = yt_downloader.download([link])
+                self.log.info(f"{channel["Name"]}|{item["id"]}> yt-dlp finished with return code {yt_ret}")
 
-                yt_downloader.download([link])
-                self.general_logger.warning(f"yt_dlp -> Finished: {link}")
-
-                self.add_extra_metadata(f"{folder_and_filename}.{selected_ext}", item)
+                #self.add_extra_metadata(f"{folder_and_filename}.{selected_ext}", item)
 
             except Exception as e:
-                self.general_logger.error(f"Error downloading video: {link}. Error message: {e}")
+                self.log.error(f"{channel["Name"]}> Error downloading video: {link}. Error message: {e}")
 
             finally:
                 temp_dir.cleanup()
@@ -482,24 +545,33 @@ class DataHandler:
         fragment_index = progress_data.get("fragment_index", 1)
         show_live_log_message = fragment_index % 10 == 0
         elapsed = progress_data.get("elapsed", 1)
+        percent = int(progress_data.get("_percent", 0))
         minutes, seconds = divmod(elapsed, 60)
 
         if status == "finished":
-            self.general_logger.warning("Download complete")
-            self.general_logger.warning("Processing file...")
+            self.log.info("Finished downloading video")
 
-        elif status == "downloading" and is_live_video and show_live_log_message:
-            downloaded_bytes_str = progress_data.get("_downloaded_bytes_str", "0")
-            elapsed_str = f"{int(minutes)} minutes and {int(seconds)} seconds"
-            self.general_logger.warning(f"Live Video - Downloaded: {downloaded_bytes_str} (Fragment Index: {fragment_index}, Elapsed: {elapsed_str})")
+        elif status == "downloading":
+            if is_live_video:
+                if not show_live_log_message:
+                    return
+                downloaded_bytes_str = progress_data.get("_downloaded_bytes_str", "0")
+                elapsed_str = f"{int(minutes)} minutes and {int(seconds)} seconds"
+                self.log.info(f"Live Video - Downloaded: {downloaded_bytes_str} (Fragment Index: {fragment_index}, Elapsed: {elapsed_str})")
 
-        elif status == "downloading" and not is_live_video and int(seconds) % 5 == 0:
-            percent_str = progress_data.get("_percent_str", "unknown")
-            total_bytes_str = progress_data.get("_total_bytes_str", "unknown")
-            speed_str = progress_data.get("_speed_str", "unknown")
-            eta_str = progress_data.get("_eta_str", "unknown")
+            else:
+                # Display progress message only once each 5%
+                if percent < self.download_progress_report_perc:
+                    return
 
-            self.general_logger.warning(f"Downloaded {percent_str} of {total_bytes_str} at {speed_str} with ETA {eta_str}")
+                self.download_progress_report_perc = (int(percent/5)+1)*5
+
+                percent_str = progress_data.get("_percent_str", "unknown")
+                total_bytes_str = progress_data.get("_total_bytes_str", "unknown")
+                speed_str = progress_data.get("_speed_str", "unknown")
+                eta_str = progress_data.get("_eta_str", "unknown")
+
+                self.log.info(f"Downloaded {percent_str} of {total_bytes_str} at {speed_str} with ETA {eta_str}")
 
     def add_extra_metadata(self, file_path, item):
         try:
@@ -512,77 +584,88 @@ class DataHandler:
             m4_file["\xa9gen"] = item["channel_name"]
             m4_file["\xa9pub"] = item["channel_name"]
             m4_file.save()
-            self.general_logger.warning(f'Added timestamp: {current_datetime} and video ID: {item["id"]} to metadata of: {file_path}')
+            self.log.info(f'Added timestamp: {current_datetime} and video ID: {item["id"]} to metadata of: {file_path}')
 
         except Exception as e:
-            self.general_logger.error(f"Error adding metadata to {file_path}: {e}")
+            self.log.error(f"Error adding metadata to {file_path}: {e}")
 
     def master_queue(self):
         try:
             self.media_server_scan_req_flag = False
-            self.general_logger.warning("Sync Task started...")
+            self.log.warning("Sync Task started...")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.thread_limit) as executor:
                 futures = []
                 for channel in self.req_channel_list:
-                    if channel.get("Last_Synced") not in ["In Progress", "Queued"]:
-                        channel["Last_Synced"] = "Queued"
-                        futures.append(executor.submit(self.process_channel, channel))
+                    if channel.get("Last_Synced") in ["In Progress", "Queued"]:
+                        self.log.info(f"queue|{channel["Name"]}> Channel synchronization already in progress")
+                        continue
+
+                    if channel.get("Paused") == 1:
+                        self.log.info(f"queue|{channel["Name"]}> Channel paused, skipping")
+                        continue
+
+                    self.log.info(f"queue|{channel["Name"]}> Adding channel to sync queue")
+                    channel["Last_Synced"] = "Queued"
+                    futures.append(executor.submit(self.process_channel, channel))
                 socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
             concurrent.futures.wait(futures)
 
             if self.req_channel_list:
                 self.save_channel_list_to_file()
             else:
-                self.general_logger.warning("Channel list empty")
+                self.log.warning("Channel list empty")
 
-            if self.media_server_scan_req_flag == True and self.media_server_tokens:
+            if self.media_server_scan_req_flag is True and self.media_server_tokens:
                 self.sync_media_servers()
             else:
-                self.general_logger.warning("Media Server Sync not required")
+                self.log.info("Media Server Sync not required")
 
         except Exception as e:
-            self.general_logger.error(f"Error in Queue: {str(e)}")
-            self.general_logger.warning("Sync Finished: Incomplete")
+            self.log.error(f"Error in Queue: {str(e)}")
+            self.log.info("Sync Finished: Incomplete")
+            socketio.emit("sync_state_changed", {"Sync_State": "stop", "Success": False})
 
         else:
-            self.general_logger.warning("Sync Finished: Complete")
+            self.log.info("Sync Finished: Complete")
+            socketio.emit("sync_state_changed", {"Sync_State": "stop", "Success": True})
 
         finally:
             socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
+            self.task_thread_started = False
 
     def process_channel(self, channel):
         try:
             channel["Last_Synced"] = "In Progress"
-            channel_folder_path = os.path.join(self.audio_download_folder, channel["Name"]) if channel["Media_Type"] == "Audio" else os.path.join(self.download_folder, channel["Name"])
+            channel_folder_path = os.path.join(self.audio_download_folder, channel["Name"]) if channel["Audio_Only"] else os.path.join(self.download_folder, channel["Name"])
             os.makedirs(channel_folder_path, exist_ok=True)
 
-            self.general_logger.warning(f'Getting current list of files for channel: {channel["Name"]} from {channel_folder_path}')
+            self.log.info(f'{channel["Name"]}> Getting current list of files for channel from {channel_folder_path}')
             current_channel_files = self.get_list_of_files_from_channel_folder(channel_folder_path)
 
-            self.general_logger.warning(f'Getting list of videos for channel: {channel["Name"]} from {channel["Link"]}')
+            self.log.info(f'{channel["Name"]}> Getting list of videos from {channel["Link"]}')
             item_download_list = self.get_list_of_videos_from_youtube(channel, current_channel_files)
 
             if item_download_list:
-                self.general_logger.warning(f'Downloading video list for: {channel["Name"]}')
+                self.log.info(f'{channel["Name"]}> Downloading video list')
                 self.download_items(item_download_list, channel_folder_path, channel)
-                self.general_logger.warning(f'Finished downloading videos for channel: {channel["Name"]}')
+                self.log.info(f'{channel["Name"]}> Finished downloading videos for channel')
             else:
-                self.general_logger.warning(f'No videos to download for: {channel["Name"]}')
+                self.log.warning(f'{channel["Name"]}> No videos to download')
 
-            self.general_logger.warning(f'Clearing Files for: {channel["Name"]}')
+            self.log.info(f'{channel["Name"]}> Clearing old files')
             self.cleanup_old_files(channel_folder_path, channel)
-            self.general_logger.warning(f'Finished Clearing Files for channel: {channel["Name"]}')
+            self.log.info(f'{channel["Name"]}> Finished Clearing old files')
 
-            self.general_logger.warning(f'Counting Files for: {channel["Name"]}')
+            self.log.info(f'{channel["Name"]}> Counting Files')
             channel["Item_Count"] = self.count_media_files(channel_folder_path)
-            self.general_logger.warning(f'Finished Counting Files for channel: {channel["Name"]}')
+            self.log.info(f'{channel["Name"]}> Finished Counting Files')
 
             channel["Last_Synced"] = datetime.datetime.now().strftime("%d-%m-%y %H:%M:%S")
-            self.general_logger.warning(f'Completed processing for channel: {channel["Name"]}')
+            self.log.info(f'{channel["Name"]}> Completed processing')
 
         except Exception as e:
-            self.general_logger.error(f'Error processing channel {channel["Name"]}: {str(e)}')
+            self.log.error(f'{channel["Name"]}> Error processing channel: {str(e)}')
             channel["Last_Synced"] = "Failed"
 
         finally:
@@ -601,9 +684,11 @@ class DataHandler:
             "Item_Count": 0,
             "Filter_Title_Text": "",
             "Negate_Filter": False,
-            "Media_Type": "Video",
-            "Search_Limit": "",
+            "Audio_Only": False,
+            "Search_Limit": 0,
             "Live_Rule": "Ignore",
+            "Write_Info_Json": True,
+            "Set_Mtime": True,
         }
         self.req_channel_list.append(new_channel)
         socketio.emit("new_channel_added", new_channel)
@@ -620,27 +705,27 @@ class DataHandler:
             try:
                 token = media_tokens.get("Plex")
                 address = media_servers.get("Plex")
-                self.general_logger.warning("Attempting Plex Sync")
+                self.log.warning("Attempting Plex Sync")
                 media_server_server = PlexServer(address, token)
                 library_section = media_server_server.library.section(self.media_server_library_name)
                 library_section.update()
-                self.general_logger.warning(f"Plex Library scan for '{self.media_server_library_name}' started.")
+                self.log.info(f"Plex Library scan for '{self.media_server_library_name}' started.")
             except Exception as e:
-                self.general_logger.warning(f"Plex Library scan failed: {str(e)}")
+                self.log.info(f"Plex Library scan failed: {str(e)}")
 
         if "Jellyfin" in media_servers and "Jellyfin" in media_tokens:
             try:
                 token = media_tokens.get("Jellyfin")
                 address = media_servers.get("Jellyfin")
-                self.general_logger.warning("Attempting Jellyfin Sync")
+                self.log.info("Attempting Jellyfin Sync")
                 url = f"{address}/Library/Refresh?api_key={token}"
                 response = requests.post(url)
                 if response.status_code == 204:
-                    self.general_logger.warning("Jellyfin Library refresh request successful.")
+                    self.log.info("Jellyfin Library refresh request successful.")
                 else:
-                    self.general_logger.warning(f"Jellyfin Error: {response.status_code}, {response.text}")
+                    self.log.info(f"Jellyfin Error: {response.status_code}, {response.text}")
             except Exception as e:
-                self.general_logger.warning(f"Jellyfin Library scan failed: {str(e)}")
+                self.log.info(f"Jellyfin Library scan failed: {str(e)}")
 
     def string_cleaner(self, input_string):
         if isinstance(input_string, str):
@@ -658,6 +743,7 @@ class DataHandler:
                 cleaned_string = temp_string.strip()
                 cleaned_strings.append(cleaned_string)
             return cleaned_strings
+        return None
 
     def convert_string_to_dict(self, raw_string):
         result = {}
@@ -688,11 +774,11 @@ class DataHandler:
                 self.sync_start_times = cleaned_sync_start_times
 
         except Exception as e:
-            self.general_logger.error(f"Error Updating Settings: {str(e)}")
+            self.log.error(f"Error Updating Settings: {str(e)}")
             self.sync_start_times = []
 
         finally:
-            self.general_logger.warning(f"Sync Hours: {str(self.sync_start_times)}")
+            self.log.info(f"Sync Hours: {str(self.sync_start_times)}")
             self.save_settings_to_file()
 
     def save_channel_changes(self, channel_to_be_saved):
@@ -700,22 +786,31 @@ class DataHandler:
             for channel in self.req_channel_list:
                 if channel["Id"] == channel_to_be_saved.get("Id"):
                     channel.update(channel_to_be_saved)
-                    self.general_logger.warning(f"Channel: {channel_to_be_saved.get('Name')} saved.")
+                    self.log.info(f"{channel_to_be_saved.get('Name')}> Channel saved.")
                     break
             else:
-                self.general_logger.warning(f"Channel Name: {channel_to_be_saved.get('Name')} not found.")
+                self.log.warning(f"{channel_to_be_saved.get('Name')}> Channel not found.")
 
         except Exception as e:
-            self.general_logger.error(f"Error Saving Channel: {str(e)}")
+            self.log.error(f"{channel_to_be_saved.get('Name')}> Error saving channel: {str(e)}")
+            return False
 
         else:
             self.save_channel_list_to_file()
+            return True
+
 
     def manual_start(self):
-        self.general_logger.warning("Manual sync triggered.")
-        task_thread = threading.Thread(target=self.master_queue, daemon=True)
-        task_thread.start()
-        socketio.emit("settings_save_message", "Manual sync initiated.")
+        if not self.task_thread_started:
+            self.task_thread_started = True
+            self.log.warning("Manual sync triggered.")
+            socketio.emit("sync_state_changed", { "Sync_State": "run" })
+            self.task_thread = threading.Thread(target=self.master_queue, daemon=True)
+            self.task_thread.start()
+        else:
+            self.log.warning("Cannot trigger manual sync, previous sync still running...")
+
+        #socketio.emit("settings_save_message", "Manual sync initiated.")
 
 
 app = Flask(__name__)
@@ -732,6 +827,7 @@ def home():
 @socketio.on("connect")
 def connection():
     socketio.emit("update_channel_list", {"Channel_List": data_handler.req_channel_list})
+    socketio.emit("sync_state_changed", { "Sync_State": "run" if data_handler.task_thread_started else "stop" })
 
 
 @socketio.on("get_settings")
@@ -762,13 +858,24 @@ def add_channel():
     data_handler.add_channel()
 
 
+@socketio.on("pause_channel")
+def pause_channel(channel_to_be_paused):
+    if data_handler.save_channel_changes(channel_to_be_paused):
+        socketio.emit("channel_save_message", "Channel paused")
+    else:
+        socketio.emit("channel_save_message", "Failed to pause channel")
+
+    socketio.emit("update_channel_list", {"Channel_List": data_handler.req_channel_list})
+
+
 @socketio.on("remove_channel")
 def remove_channel(channel_to_be_removed):
     data_handler.remove_channel(channel_to_be_removed)
 
 
-@socketio.on("manual_start")
+@socketio.on("sync_toggle")
 def manual_start():
+    data_handler.log.warning(f"Manual synchronization toggle")
     data_handler.manual_start()
 
 

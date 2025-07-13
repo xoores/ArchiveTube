@@ -1,10 +1,12 @@
 const config_modal = document.getElementById("config-modal");
 const save_changes_button = document.getElementById("save-changes-button");
-const manual_start_button = document.getElementById("manual-start-button");
+//const manual_start_button = document.getElementById("manual-start-button");
+const sync_status_button = document.getElementById("sync-status-button");
 const sync_start_times = document.getElementById("sync-start-times");
 const media_server_addresses = document.getElementById("media-server-addresses");
 const media_server_tokens = document.getElementById("media-server-tokens");
 const media_server_library_name = document.getElementById("media-server-library-name");
+const sync_status_button_icon = document.getElementById("sync-status-button-icon");
 const add_channel = document.getElementById("add-channel");
 const channel_table = document.getElementById("channel-table").querySelector("tbody");
 const modal_channel_template = document.getElementById("modal-channel-template").content;
@@ -28,24 +30,21 @@ function open_edit_modal(channel_id) {
     channel_edit_modal_container.appendChild(document.importNode(modal_channel_template, true));
 
     const modal = channel_edit_modal_container.querySelector("#modal-channel-config");
-    const channel_name_input = modal.querySelector("#channel-name");
-    const channel_link_input = modal.querySelector("#channel-link");
-    const download_days_input = modal.querySelector("#download-days");
-    const keep_days_input = modal.querySelector("#keep-days");
-    const title_filter_text_input = modal.querySelector("#title-filter-text");
     const negate_filter_checkbox = modal.querySelector("#negate-filter");
-    const media_type_selector = modal.querySelectorAll("input[name='media-type-selector']");
     const filter_text_description = modal.querySelector("#filter-text-description");
-    const search_limit_input = modal.querySelector("#search-limit");
-    const live_rule_selector = modal.querySelectorAll("input[name='live-rule-selector']");
 
-    channel_name_input.value = channel.Name;
-    channel_link_input.value = channel.Link;
-    download_days_input.value = channel.DL_Days;
-    keep_days_input.value = channel.Keep_Days;
-    title_filter_text_input.value = channel.Filter_Title_Text;
+    modal.querySelector("#channel-name").value = channel.Name;
+    modal.querySelector("#channel-link").value = channel.Link;
+    modal.querySelector("#download-days").value = channel.DL_Days;
+    modal.querySelector("#keep-days").value = channel.Keep_Days;
+    modal.querySelector("#title-filter-text").value = channel.Filter_Title_Text;
     negate_filter_checkbox.checked = channel.Negate_Filter;
-    search_limit_input.value = channel.Search_Limit;
+    modal.querySelector("#search-limit").value = channel.Search_Limit;
+    modal.querySelector("#set-remove-sponsored").checked = channel.Use_SponsorBlock;
+    modal.querySelector("#set-best-quality").checked = channel.Use_Best_Quality;
+    modal.querySelector("#set-audio-only").checked = channel.Audio_Only;
+    modal.querySelector("#set-write-info-json").checked = channel.Write_Info_Json;
+    modal.querySelector("#set-mtime").checked = channel.Set_Mtime;
 
     change_filter_description(negate_filter_checkbox, filter_text_description);
 
@@ -53,13 +52,7 @@ function open_edit_modal(channel_id) {
         change_filter_description(negate_filter_checkbox, filter_text_description);
     });
 
-    media_type_selector.forEach(radio => {
-        if (radio.value === channel.Media_Type) {
-            radio.checked = true;
-        }
-    });
-
-    live_rule_selector.forEach(radio => {
+    modal.querySelectorAll("input[name='live-rule-selector']").forEach(radio => {
         if (radio.value === channel.Live_Rule) {
             radio.checked = true;
         }
@@ -84,7 +77,7 @@ function add_row_to_channel_table(channel) {
     const row = new_row.querySelector("tr");
 
     row.id = channel.Id;
-    row.querySelector(".channel-name").textContent = channel.Name;
+    row.querySelector(".channel-name").innerHTML = "<a class=\"text-decoration-none\" target=\"_blank\" href=\"" + channel.Link + "\">" + channel.Name + "</a>";
     row.querySelector(".channel-last-synced").textContent = channel.Last_Synced;
     row.querySelector(".channel-item-count").textContent = channel.Item_Count;
 
@@ -96,6 +89,29 @@ function add_row_to_channel_table(channel) {
     const remove_button = row.querySelector(".remove-button");
     remove_button.addEventListener("click", function () {
         remove_channel(channel);
+    });
+
+    const pause_button = row.querySelector(".pause-button");
+    const pause_button_icon = row.querySelector(".pause-btn-icon");
+
+    if( channel.Paused ) {
+        pause_button_icon.classList.remove("fa-play")
+        pause_button_icon.classList.add("fa-pause")
+        pause_button_icon.classList.add("fa-fade")
+        pause_button.title = "Channel synchronization paused, click to resume"
+    } else {
+        pause_button_icon.classList.add("fa-play")
+        pause_button_icon.classList.remove("fa-pause")
+        pause_button_icon.classList.remove("fa-fade")
+        pause_button.title = "Channel synchronization enabled, click to pause"
+
+    }
+    //pause_button_icon.classList = [ "fa-solid", "fa-pause" ]
+    //pause_button.textContent = channel.Paused ? "Resume" : "Pause";
+
+
+    pause_button.addEventListener("click", function () {
+        pause_channel(channel, pause_button);
     });
 
     channel_table.appendChild(row);
@@ -116,6 +132,15 @@ function remove_channel(channel_to_be_removed) {
         }
     }
 }
+function pause_channel(channel_to_be_paused, pause_button) {
+    if( !channel_to_be_paused.Paused ) {
+        const confirmation = confirm(`Do you want to pause channel "${channel_to_be_paused.Name}"?`);
+        if (!confirmation) return;
+    }
+
+    channel_to_be_paused.Paused = !channel_to_be_paused.Paused
+    socket.emit("pause_channel", channel_to_be_paused);
+}
 
 function save_channel_changes(channel) {
     let download_days = parseInt(document.getElementById("download-days").value, 10);
@@ -125,6 +150,7 @@ function save_channel_changes(channel) {
         keep_days = download_days;
         document.getElementById("keep-days").value = keep_days;
     }
+
     const channel_updates = {
         Id: channel.Id,
         Name: document.getElementById("channel-name").value,
@@ -133,9 +159,13 @@ function save_channel_changes(channel) {
         Keep_Days: parseInt(document.getElementById("keep-days").value, 10),
         Filter_Title_Text: document.getElementById("title-filter-text").value,
         Negate_Filter: document.getElementById("negate-filter").checked,
-        Media_Type: document.querySelector("input[name='media-type-selector']:checked").value,
-        Search_Limit: document.getElementById("search-limit").value,
-        Live_Rule: document.querySelector("input[name='live-rule-selector']:checked").value
+        //Media_Type: document.querySelector("input[name='media-type-selector']:checked").value,
+        Search_Limit: parseInt(document.getElementById("search-limit").value, 10),
+        Audio_Only: document.getElementById("set-audio-only").checked,
+        Use_SponsorBlock: document.getElementById("set-remove-sponsored").checked,
+        Use_Best_Quality: document.getElementById("set-best-quality").checked,
+        Write_Info_Json: document.getElementById("set-write-info-json").checked,
+        Set_Mtime: document.getElementById("set-mtime").checked,
     };
 
     socket.emit("save_channel_changes", channel_updates);
@@ -157,8 +187,8 @@ config_modal.addEventListener("show.bs.modal", function (event) {
     socket.emit("get_settings");
 });
 
-manual_start_button.addEventListener("click", () => {
-    socket.emit("manual_start");
+sync_status_button.addEventListener("click", () => {
+    socket.emit("sync_toggle");
 });
 
 save_changes_button.addEventListener("click", () => {
@@ -203,6 +233,26 @@ socket.on("update_channel_list", function (data) {
 socket.on("new_channel_added", function (new_channel) {
     channel_list.push(new_channel);
     add_row_to_channel_table(new_channel);
+});
+
+socket.on("sync_state_changed", function (sync_state) {
+    console.log("sync_state_changed", sync_state);
+    switch( sync_state.Sync_State ) {
+        case "run":
+            sync_status_button_icon.classList.remove("fa-circle-stop", "fa-circle-check", "fa-circle-exclamation")
+            sync_status_button_icon.classList.add("fa-circle-down", "fa-beat-fade")
+            break;
+
+        case "stop":
+            sync_status_button_icon.classList.remove("fa-circle-down", "fa-beat-fade")
+            if( sync_state.Success ) {
+                sync_status_button_icon.classList.add("fa-circle-check")
+            } else {
+                sync_status_button_icon.classList.add("fa-circle-exclamation")
+            }
+            break;
+    }
+
 });
 
 socket.on("current_settings", function (settings) {

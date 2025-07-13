@@ -45,5 +45,5 @@ jobs:
           git config --global user.email "yt-dlp@autoupdate"
           git config --global user.name "yt-dlp-autoupdate"
           git add requirements.txt
-          git commit -m "Update yt-dlp version to $latest_version"
+          git commit -m "Autoupdate yt-dlp version to $latest_version"
           git push
