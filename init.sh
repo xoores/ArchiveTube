@@ -16,6 +16,7 @@ echo -n " - yt-dlp: "; pip show yt-dlp | grep Version: | awk '{print $2}'
 echo -n " - ffmpeg: "; ffmpeg -version | head -n 1 | awk '{print $3}'
 echo -n " - python: "; python --version | cut -d' ' -f2-
 echo -n " - gunicorn: "; gunicorn --version | cut -d'(' -f2 | cut -d' ' -f2 | cut -d')' -f1
+echo -n " - curl-impersonate: "; curl-impersonate --version  | head -n1
 echo -e " - ArchiveTube: ${RELEASE_VERSION:-?}"
 
 echo -e "\e[1mEnvironment:\e[0m"
