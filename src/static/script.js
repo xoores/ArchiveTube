@@ -3,6 +3,7 @@ const save_changes_button = document.getElementById("save-changes-button");
 const sync_status_button = document.getElementById("sync-status-button");
 const sync_start_times = document.getElementById("sync-start-times");
 const ignore_ssl_errors = document.getElementById("ignore-ssl-errors");
+const yt_slow = document.getElementById("yt-slow");
 const media_server_addresses = document.getElementById("media-server-addresses");
 const media_server_tokens = document.getElementById("media-server-tokens");
 const media_server_library_name = document.getElementById("media-server-library-name");
@@ -198,6 +199,7 @@ save_changes_button.addEventListener("click", () => {
         "media_server_tokens": media_server_tokens.value,
         "media_server_library_name": media_server_library_name.value,
         "ignore_ssl_errors": ignore_ssl_errors.checked,
+        "youtube_slow": yt_slow.checked,
     });
 });
 
@@ -263,7 +265,8 @@ socket.on("current_settings", function (settings) {
     media_server_addresses.value = settings.media_server_addresses;
     media_server_tokens.value = settings.media_server_tokens;
     media_server_library_name.value = settings.media_server_library_name;
-    ignore_ssl_errors.checked = settings.ignore_ssl_errors
+    ignore_ssl_errors.checked = settings.ignore_ssl_errors;
+    yt_slow.checked = settings.youtube_slow;
 });
 
 

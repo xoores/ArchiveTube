@@ -112,6 +112,7 @@ class DataHandler:
         self.include_id_in_filename = True
         self.verbose_logs = os.environ.get("verbose_logs", "false").lower() == "true"
         self.ignore_ssl_errors = False
+        self.youtube_slow = False
 
         # TODO: Add option to control verbose logs from the UI
         if self.verbose_logs:
@@ -119,10 +120,20 @@ class DataHandler:
             self.log.debug("Verbose logs enabled")
 
         self.ytd_extra_parameters = {
-            "ffmpeg_location": "/usr/bin/ffmpeg",
-            "verbose": self.verbose_logs,
-            "logger": self.log,
-            "quiet": True,
+            "ffmpeg_location":          "/usr/bin/ffmpeg",
+            "verbose":                  self.verbose_logs,
+            "logger":                   self.log,
+            "quiet":                    True,
+            'fragment_retries':         10,
+            'retries':                  10,
+        }
+
+        # This gets used when self.youtube_slow is True
+        self.ytd_slow_parameters = {
+            'max_sleep_interval':       20.0,
+            'sleep_interval':           10.0,
+            'sleep_interval_requests':  0.75,
+            'sleep_interval_subtitles': 5
         }
 
         os.makedirs(self.config_folder, exist_ok=True)
@@ -165,6 +176,7 @@ class DataHandler:
                 self.media_server_tokens = ret.get("media_server_tokens", "")
                 self.media_server_library_name = ret.get("media_server_library_name", "")
                 self.ignore_ssl_errors = ret.get("ignore_ssl_errors", False)
+                self.youtube_slow = ret.get("youtube_slow", False)
 
         except Exception as e:
             self.log.error(f"Error Loading Config: {str(e)}")
@@ -181,7 +193,8 @@ class DataHandler:
                         "media_server_addresses": self.media_server_addresses,
                         "media_server_tokens": self.media_server_tokens,
                         "media_server_library_name": self.media_server_library_name,
-                        "ignore_ssl_errors": self.ignore_ssl_errors
+                        "ignore_ssl_errors": self.ignore_ssl_errors,
+                        "youtube_slow": self.youtube_slow
                     },
                     json_file,
                     indent=4,
@@ -297,6 +310,9 @@ class DataHandler:
             "match_filter": video_duration_filter,
         }
         ydl_opts |= self.ytd_extra_parameters
+
+        if self.youtube_slow is True:
+            ydl_opts |= self.ytd_slow_parameters
 
         if search_limit > 0:
             ydl_opts["playlist_items"] = f"1-{search_limit}"
@@ -528,8 +544,11 @@ class DataHandler:
     def download_items(self, item_list, channel_folder_path, channel):
         fails = 0
         temp_dir = None
+        current_item = 0
         for item in item_list:
-            self.log.info(f"{channel["Name"]}|{item["id"]}> Processing download of '{item["title"]}'")
+            current_item += 1
+
+            self.log.info(f"{channel["Name"]}|{item["id"]}> Processing download of '{item["title"]}' [{current_item}/{len(item_list)}]")
 
             try:
                 temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -590,6 +609,9 @@ class DataHandler:
                     "writeinfojson": channel["Write_Info_Json"],
                 }
                 ydl_opts |= self.ytd_extra_parameters
+
+                if self.youtube_slow is True:
+                    ydl_opts |= self.ytd_slow_parameters
 
                 if self.subtitles in ["embed", "external"]:
                     ydl_opts.update(
@@ -907,6 +929,7 @@ class DataHandler:
         self.media_server_tokens = data["media_server_tokens"]
         self.media_server_library_name = data["media_server_library_name"]
         self.ignore_ssl_errors = data["ignore_ssl_errors"]
+        self.youtube_slow = data["youtube_slow"]
 
         try:
             if data["sync_start_times"] == "":
@@ -983,6 +1006,7 @@ def get_settings():
         "media_server_tokens": data_handler.media_server_tokens,
         "media_server_library_name": data_handler.media_server_library_name,
         "ignore_ssl_errors": data_handler.ignore_ssl_errors,
+        "youtube_slow": data_handler.youtube_slow,
     }
     socketio.emit("current_settings", data)
 
