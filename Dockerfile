@@ -1,4 +1,5 @@
-FROM python:3.13-alpine
+FROM lexiforest/curl-impersonate:alpine
+#FROM python:3.13-alpine
 
 ARG RELEASE_VERSION
 ENV RELEASE_VERSION=${RELEASE_VERSION}
