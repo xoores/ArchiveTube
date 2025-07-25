@@ -120,4 +120,4 @@ To utilize a cookies file with yt-dlp, follow these steps:
 ---
 
 
-https://hub.docker.com/r/thewicklowwolf/channeltube
+https://hub.docker.com/r/xoores/archivetube

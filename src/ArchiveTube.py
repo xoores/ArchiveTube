@@ -6,6 +6,7 @@ import json
 import time
 import datetime
 import threading
+from numbers import Number
 
 from gevent import monkey
 from mutagen.mp4 import MP4
@@ -33,6 +34,20 @@ def video_duration_filter( info, *, incomplete ):
     if duration and duration < 90:
         return 'The video is too short'
     return None
+
+
+def number_si_suffix( num: Number ) -> str:
+    """
+    Convert number to a form with SI suffix
+
+    Shamelessly borrowed from https://stackoverflow.com/a/15485265 - thanks Pyrocater
+    """
+
+    for unit in ("", "k", "M", "G", "T", "P", "E", "Z"):
+        if abs(num) < 1000.0:
+            return f"{num:3.1f}{unit}"
+        num /= 1024.0
+    return f"{num:.1f}Y"
 
 
 class FancyFormatter(logging.Formatter):
@@ -66,7 +81,6 @@ class DataHandler:
         log_shandler.setFormatter(FancyFormatter(logger_fmt))
         self.log.addHandler(log_shandler)
 
-
         self.task_thread = None
         self.task_thread_started = False
 
@@ -78,6 +92,7 @@ class DataHandler:
 
         self.download_progress_report_perc = 0
         self.config_folder = "config"
+        # TODO: Fix process_channel_errors by making it thread-safe!
         self.process_channel_errors = 0
         self.download_folder = "downloads"
         self.audio_download_folder = "audio_downloads"
@@ -96,7 +111,9 @@ class DataHandler:
         self.subtitle_languages = os.environ.get("subtitle_languages", "en").split(",")
         self.include_id_in_filename = True
         self.verbose_logs = os.environ.get("verbose_logs", "false").lower() == "true"
+        self.ignore_ssl_errors = False
 
+        # TODO: Add option to control verbose logs from the UI
         if self.verbose_logs:
             self.log.setLevel(logging.DEBUG)
             self.log.debug("Verbose logs enabled")
@@ -124,10 +141,17 @@ class DataHandler:
         if os.path.exists(self.channel_list_config_file):
             self.load_channel_list_from_file()
 
+        # TODO: Add support for getting cookies directly from the browser (by passing profile directory). It is a PITA
+        #       passing cookies.txt manually. Especially since it changes whenever I click on something on YT.
+        # TODO: Test if it be sufficient to log in in different browser - that way I can still keep watching YT without
+        #       screwing my cookies all the time.
         full_cookies_path = os.path.join(self.config_folder, "cookies.txt")
         if os.path.exists(full_cookies_path):
             self.log.warning("Using provided cookies.txt!")
             self.ytd_extra_parameters["cookiefile"] = full_cookies_path
+
+        if self.ignore_ssl_errors:
+            self.ytd_extra_parameters["nocheckcertificate"] = True
 
         task_thread = threading.Thread(target=self.schedule_checker, daemon=True)
         task_thread.start()
@@ -136,15 +160,19 @@ class DataHandler:
         try:
             with open(self.settings_config_file, "r") as json_file:
                 ret = json.load(json_file)
-            self.sync_start_times = ret["sync_start_times"]
-            self.media_server_addresses = ret["media_server_addresses"]
-            self.media_server_tokens = ret["media_server_tokens"]
-            self.media_server_library_name = ret["media_server_library_name"]
+                self.sync_start_times = ret.get("sync_start_times", "")
+                self.media_server_addresses = ret.get("media_server_addresses", "")
+                self.media_server_tokens = ret.get("media_server_tokens", "")
+                self.media_server_library_name = ret.get("media_server_library_name", "")
+                self.ignore_ssl_errors = ret.get("ignore_ssl_errors", False)
 
         except Exception as e:
             self.log.error(f"Error Loading Config: {str(e)}")
 
-    def save_settings_to_file(self):
+        else:
+            self.log.info("Settings successfully loaded!")
+
+    def save_settings_to_file_and_reload( self ):
         try:
             with open(self.settings_config_file, "w") as json_file:
                 json.dump(
@@ -153,6 +181,7 @@ class DataHandler:
                         "media_server_addresses": self.media_server_addresses,
                         "media_server_tokens": self.media_server_tokens,
                         "media_server_library_name": self.media_server_library_name,
+                        "ignore_ssl_errors": self.ignore_ssl_errors
                     },
                     json_file,
                     indent=4,
@@ -162,7 +191,8 @@ class DataHandler:
             self.log.error(f"Error Saving Config: {str(e)}")
 
         else:
-            self.log.warning(f"Settings Saved.")
+            self.log.warning(f"Settings saved, re-applying...")
+            self.load_settings_from_file()
 
     def load_channel_list_from_file(self):
         try:
@@ -181,14 +211,19 @@ class DataHandler:
                         import_Search_Limit = 0
 
                     full_channel_data = {
+                        # ID of channel (immutable)
                         "Id": idx,
                         "Name": channel.get("Name", ""),
                         "Link": channel.get("Link", ""),
+                        # Synchronization disabled (paused) or not
                         "Paused": bool(channel.get("Paused", False)),
                         "DL_Days": int(channel.get("DL_Days", 0)),
                         "Keep_Days": int(channel.get("Keep_Days", 0)),
                         "Last_Synced": synced_state,
                         "Item_Count": int(channel.get("Item_Count", 0)),
+                        "Item_Size": 0,
+                        # Remote media count
+                        "Remote_Count": int(channel.get("Remote_Count", 0)),
                         "Filter_Title_Text": channel.get("Filter_Title_Text", ""),
                         "Negate_Filter": bool(channel.get("Negate_Filter", False)),
                         "Search_Limit": int(import_Search_Limit),
@@ -200,7 +235,9 @@ class DataHandler:
                         "Set_Mtime": bool(channel.get("Set_Mtime", True)),
                     }
 
-                    full_channel_data["Item_Count"] = self.count_media_files_for_channel( full_channel_data )
+                    itm_count, itm_size = self.count_media_files_for_channel( full_channel_data )
+                    full_channel_data["Item_Count"] = itm_count
+                    full_channel_data["Item_Size"] = itm_size
                     if full_channel_data["Item_Count"] == -1:
                         full_channel_data["Last_Synced"] = "Never"
                         full_channel_data["Item_Count"] = 0
@@ -212,6 +249,7 @@ class DataHandler:
 
         except Exception as e:
             self.log.error(f"load_channel_list_from_file> Error Loading Channels: {str(e)}")
+            self.log.exception(e)
 
     def save_channel_list_to_file(self):
         try:
@@ -244,6 +282,10 @@ class DataHandler:
                 time.sleep(600)
 
     def get_list_of_videos_from_youtube(self, channel, current_channel_files):
+        # TODO: It would be nice to cache individual video metadata so we don't have to re-download it. This does not
+        #       really matter in the production, but it really sucks to re-download same stuff again and again during
+        #       the development. Not to mention that this is probably the reason my IP got blacklisted by YT.
+
         days_to_retrieve = channel["DL_Days"]
         channel_link = channel["Link"]
         search_limit = channel["Search_Limit"]
@@ -373,7 +415,9 @@ class DataHandler:
                     file_base_name, file_ext = os.path.splitext(filename)
                     id_in_title = re.search(r"\[([0-9A-Za-z_-]{10,}[048AEIMQUYcgkosw])\]", file_base_name)
                     if id_in_title:
-                        folder_info["id_list"].append(id_in_title.group(1))
+                        if file_ext.lower() in MEDIA_FILE_EXTENSIONS:
+                            folder_info["id_list"].append(id_in_title.group(1))
+                            folder_info["filename_list"].append(file_base_name)
 
                     elif file_ext.lower() in MEDIA_FILE_EXTENSIONS:
                         folder_info["filename_list"].append(file_base_name)
@@ -391,18 +435,19 @@ class DataHandler:
             self.log.info(f'Found {len(folder_info["filename_list"])} files and {len(folder_info["id_list"])} IDs in {channel_folder_path}.')
             return folder_info
 
-    def count_media_files_for_channel( self, channel ):
+    def count_media_files_for_channel( self, channel ) -> tuple[int, str]:
         channel_folder_path = self.audio_download_folder if channel["Audio_Only"] else self.download_folder
         channel_folder_path = os.path.join(channel_folder_path, channel["Name"])
 
         if not os.path.isdir(channel_folder_path) or channel["Name"] == "":
-            return -1
+            return -1, "-"
 
         return self.count_media_files(channel_folder_path)
 
-    def count_media_files(self, channel_folder_path):
+    def count_media_files(self, channel_folder_path) -> tuple[int, str]:
         video_item_count = 0
         audio_item_count = 0
+        files_size = 0
 
         raw_directory_list = os.listdir(channel_folder_path)
         for filename in raw_directory_list:
@@ -410,15 +455,17 @@ class DataHandler:
             if not os.path.isfile(file_path):
                 continue
 
+            files_size += os.path.getsize(file_path)
+
             file_base_name, file_ext = os.path.splitext(filename.lower())
             if file_ext in VIDEO_EXTENSIONS:
                 video_item_count += 1
             elif file_ext in AUDIO_EXTENSIONS:
                 audio_item_count += 1
 
-        self.log.info(f"count_media_files|{channel_folder_path}> Found {video_item_count} video files and {audio_item_count} audio files")
+        self.log.info(f"count_media_files|{channel_folder_path}> Found {video_item_count} video files and {audio_item_count} audio files, totalling {number_si_suffix(files_size)}B")
 
-        return video_item_count + audio_item_count
+        return video_item_count + audio_item_count, number_si_suffix(files_size)
 
     def cleanup_old_files(self, channel_folder_path, channel):
         days_to_keep = channel["Keep_Days"]
@@ -572,8 +619,9 @@ class DataHandler:
                 #self.add_extra_metadata(f"{folder_and_filename}.{selected_ext}", item)
 
                 # Update media counter so we can see progress in GUI
-                channel.update( { "Item_Count": self.count_media_files(channel_folder_path) } )
-                socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
+                itm_count, itm_size = self.count_media_files(channel_folder_path)
+                channel.update( { "Item_Count": itm_count, "Item_Size": itm_size } )
+                self.emit_channel_refresh()
 
                 fails = 0
             except Exception as e:
@@ -669,7 +717,7 @@ class DataHandler:
                     channel["Last_Synced"] = "Queued"
                     sync_eligible_channels += 1
                     futures.append(executor.submit(self.process_channel, channel))
-                socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
+                self.emit_channel_refresh()
             concurrent.futures.wait(futures)
 
             if self.req_channel_list:
@@ -697,7 +745,7 @@ class DataHandler:
             self.log.info(f"Sync Finished: Completed all {sync_eligible_channels} channels")
             socketio.emit("sync_state_changed", {"Sync_State": "stop", "Success": True})
 
-        socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
+        self.emit_channel_refresh()
         self.task_thread_started = False
 
     def process_channel(self, channel):
@@ -721,6 +769,7 @@ class DataHandler:
                 self.log.warning(f'{channel["Name"]}> FAILED to get list of videos from YT, increasing error counter to {self.process_channel_errors}')
 
             elif item_download_list:
+                channel["Remote_Count"] = len(item_download_list)
                 self.log.info(f'{channel["Name"]}> Downloading video list')
                 if not self.download_items(item_download_list, channel_folder_path, channel):
                     self.process_channel_errors += 1
@@ -734,29 +783,31 @@ class DataHandler:
 
             else:
                 self.log.warning(f'{channel["Name"]}> No videos to download')
+                channel["Remote_Count"] = 0
 
             self.log.info(f'{channel["Name"]}> Clearing old files')
             self.cleanup_old_files(channel_folder_path, channel)
             self.log.info(f'{channel["Name"]}> Finished clearing old files, recounting files...')
-            channel["Item_Count"] = self.count_media_files(channel_folder_path)
-
-            # TODO: Update Last_Synced only on successful sync - right now the logic is not really ideal, when Sync
-            #       starts it changes Last_Synced to "In Progress" and saves it to the channel_list.json... So we really
-            #       *have* to set it like this for now. But I want to fix this...
-            channel["Last_Synced"] = datetime.datetime.now().strftime("%d-%m-%y %H:%M:%S")
-
-            if not sync_encountered_problem:
-                self.log.info(f'{channel["Name"]}> Channel processed')
-            else:
-                self.log.warning(f'{channel["Name"]}> Channel processed with some problems (check logs).')
-
+            itm_count, itm_size = self.count_media_files(channel_folder_path)
+            channel["Item_Count"] = itm_count
+            channel["Item_Size"] = itm_size
 
         except Exception as e:
             self.log.error(f'{channel["Name"]}> Error processing channel: {str(e)}')
-            channel["Last_Synced"] = "Failed"
+            sync_encountered_problem = True
 
         finally:
-            socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
+            # TODO: Update Last_Synced only on successful sync - right now the logic is not really ideal, when Sync
+            #       starts it changes Last_Synced to "In Progress" and saves it to the channel_list.json... So we really
+            #       *have* to set it like this for now. But I want to fix this properly...
+
+            if not sync_encountered_problem:
+                self.log.info(f'{channel["Name"]}> Channel processed')
+                channel["Last_Synced"] = datetime.datetime.now().strftime("%d-%m-%y %H:%M:%S")
+            else:
+                self.log.warning(f'{channel["Name"]}> Channel processed with some problems (check logs).')
+                channel["Last_Synced"] = "Failed"
+            self.emit_channel_refresh()
 
     def add_channel(self):
         existing_ids = [channel.get("Id", 0) for channel in self.req_channel_list]
@@ -769,6 +820,8 @@ class DataHandler:
             "DL_Days": 14,
             "Last_Synced": "Never",
             "Item_Count": 0,
+            "Item_Size": 0,
+            "Remote_Count": 0,
             "Filter_Title_Text": "",
             "Negate_Filter": False,
             "Audio_Only": False,
@@ -780,6 +833,9 @@ class DataHandler:
         self.req_channel_list.append(new_channel)
         socketio.emit("new_channel_added", new_channel)
         self.save_channel_list_to_file()
+
+    def emit_channel_refresh( self ):
+        socketio.emit("update_channel_list", {"Channel_List": self.req_channel_list})
 
     def remove_channel(self, channel_to_be_removed):
         self.req_channel_list = [channel for channel in self.req_channel_list if channel["Id"] != channel_to_be_removed["Id"]]
@@ -850,6 +906,7 @@ class DataHandler:
         self.media_server_addresses = data["media_server_addresses"]
         self.media_server_tokens = data["media_server_tokens"]
         self.media_server_library_name = data["media_server_library_name"]
+        self.ignore_ssl_errors = data["ignore_ssl_errors"]
 
         try:
             if data["sync_start_times"] == "":
@@ -866,10 +923,14 @@ class DataHandler:
 
         finally:
             self.log.info(f"Sync Hours: {str(self.sync_start_times)}")
-            self.save_settings_to_file()
+            self.save_settings_to_file_and_reload()
 
     def save_channel_changes(self, channel_to_be_saved):
         try:
+            # Remove fields that we don't want to be updatable from WebGUI
+            for rem in ("Item_Count", "Item_Size", "Last_Synced", "Remote_Count"):
+                channel_to_be_saved.pop(rem, None)
+
             for channel in self.req_channel_list:
                 if channel["Id"] == channel_to_be_saved.get("Id"):
                     channel.update(channel_to_be_saved)
@@ -885,7 +946,6 @@ class DataHandler:
         else:
             self.save_channel_list_to_file()
             return True
-
 
     def manual_start(self):
         if not self.task_thread_started:
@@ -922,6 +982,7 @@ def get_settings():
         "media_server_addresses": data_handler.media_server_addresses,
         "media_server_tokens": data_handler.media_server_tokens,
         "media_server_library_name": data_handler.media_server_library_name,
+        "ignore_ssl_errors": data_handler.ignore_ssl_errors,
     }
     socketio.emit("current_settings", data)
 

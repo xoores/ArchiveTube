@@ -49,10 +49,23 @@
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <div class="form-group-modal ">
-            <label for="sync-start-times">Sync Schedule:</label>
-            <input type="text" class="form-control border-secondary-subtle" id="sync-start-times"
-              placeholder="Enter Hour in 24hr format (use , for multiple hours)">
+
+
+          <div class="form-group my-3">
+              <fieldset class="col">
+                <legend>General sync settings:</legend>
+
+                <div class="form-group-modal  my-3">
+                  <label for="sync-start-times">Sync Schedule:</label>
+                  <input type="text" class="form-control border-secondary-subtle" id="sync-start-times"
+                    placeholder="Enter Hour in 24hr format (use , for multiple hours)">
+                </div>
+
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="ignore-ssl-errors">
+                  <label class="form-check-label" for="ignore-ssl-errors">Ignore SSL errors</label>
+                </div>
+              </fieldset>
           </div>
 
           <div class="form-group my-3">
@@ -109,6 +122,7 @@
           <th>Channel Name</th>
           <th>Last Sync</th>
           <th class="col text-center">Items</th>
+          <th class="col text-center">Size</th>
           <th class="col text-center">Actions</th>
         </tr>
       </thead>
@@ -125,6 +139,7 @@
       <td class="channel-name"></td>
       <td class="channel-last-synced"></td>
       <td class="text-center channel-item-count"></td>
+      <td class="text-center channel-item-size"></td>
       <td class="text-center">
         <button class="btn btn-sm btn-primary custom-button-width edit-button"><i class="fa-solid fa-pen"></i></button>
         <button class="btn btn-sm btn-secondary custom-button-width pause-button"><i class="pause-btn-icon fa-solid"></i></button>

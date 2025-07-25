@@ -1,8 +1,8 @@
 const config_modal = document.getElementById("config-modal");
 const save_changes_button = document.getElementById("save-changes-button");
-//const manual_start_button = document.getElementById("manual-start-button");
 const sync_status_button = document.getElementById("sync-status-button");
 const sync_start_times = document.getElementById("sync-start-times");
+const ignore_ssl_errors = document.getElementById("ignore-ssl-errors");
 const media_server_addresses = document.getElementById("media-server-addresses");
 const media_server_tokens = document.getElementById("media-server-tokens");
 const media_server_library_name = document.getElementById("media-server-library-name");
@@ -79,7 +79,8 @@ function add_row_to_channel_table(channel) {
     row.id = channel.Id;
     row.querySelector(".channel-name").innerHTML = "<a class=\"text-decoration-none\" target=\"_blank\" href=\"" + channel.Link + "\">" + channel.Name + "</a>";
     row.querySelector(".channel-last-synced").textContent = channel.Last_Synced;
-    row.querySelector(".channel-item-count").textContent = channel.Item_Count;
+    row.querySelector(".channel-item-count").textContent = channel.Item_Count + " / " + channel.Remote_Count;
+    row.querySelector(".channel-item-size").textContent = channel.Item_Size;
 
     const edit_button = row.querySelector(".edit-button");
     edit_button.addEventListener("click", function () {
@@ -159,7 +160,6 @@ function save_channel_changes(channel) {
         Keep_Days: parseInt(document.getElementById("keep-days").value, 10),
         Filter_Title_Text: document.getElementById("title-filter-text").value,
         Negate_Filter: document.getElementById("negate-filter").checked,
-        //Media_Type: document.querySelector("input[name='media-type-selector']:checked").value,
         Search_Limit: parseInt(document.getElementById("search-limit").value, 10),
         Audio_Only: document.getElementById("set-audio-only").checked,
         Use_SponsorBlock: document.getElementById("set-remove-sponsored").checked,
@@ -197,6 +197,7 @@ save_changes_button.addEventListener("click", () => {
         "media_server_addresses": media_server_addresses.value,
         "media_server_tokens": media_server_tokens.value,
         "media_server_library_name": media_server_library_name.value,
+        "ignore_ssl_errors": ignore_ssl_errors.checked,
     });
 });
 
@@ -223,6 +224,8 @@ socket.on("channel_save_message", function (message) {
 });
 
 socket.on("update_channel_list", function (data) {
+    console.log(data)
+
     channel_table.innerHTML = "";
     channel_list = data.Channel_List;
     channel_list.forEach(channel => {
@@ -260,6 +263,7 @@ socket.on("current_settings", function (settings) {
     media_server_addresses.value = settings.media_server_addresses;
     media_server_tokens.value = settings.media_server_tokens;
     media_server_library_name.value = settings.media_server_library_name;
+    ignore_ssl_errors.checked = settings.ignore_ssl_errors
 });
 
 
