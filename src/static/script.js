@@ -9,10 +9,23 @@ const media_server_tokens = document.getElementById("media-server-tokens");
 const media_server_library_name = document.getElementById("media-server-library-name");
 const sync_status_button_icon = document.getElementById("sync-status-button-icon");
 const add_channel = document.getElementById("add-channel");
+const total_library_size = document.getElementById("total-library-size");
 const channel_table = document.getElementById("channel-table").querySelector("tbody");
 const modal_channel_template = document.getElementById("modal-channel-template").content;
 let channel_list = [];
 const socket = io();
+
+function number_si_suffix( bytes ) {
+    if (!+bytes) return '0 B'
+
+    const k = 1000
+    const dm = 1
+    const sizes = ['B', 'kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB']
+
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`
+}
 
 function change_filter_description(negate_filter_checkbox, filter_text_description) {
     filter_text_description.textContent = negate_filter_checkbox.checked
@@ -81,7 +94,7 @@ function add_row_to_channel_table(channel) {
     row.querySelector(".channel-name").innerHTML = "<a class=\"text-decoration-none\" target=\"_blank\" href=\"" + channel.Link + "\">" + channel.Name + "</a>";
     row.querySelector(".channel-last-synced").textContent = channel.Last_Synced;
     row.querySelector(".channel-item-count").textContent = channel.Item_Count + " / " + channel.Remote_Count;
-    row.querySelector(".channel-item-size").textContent = channel.Item_Size;
+    row.querySelector(".channel-item-size").textContent = number_si_suffix(channel.Item_Size);
 
     const edit_button = row.querySelector(".edit-button");
     edit_button.addEventListener("click", function () {
@@ -230,9 +243,16 @@ socket.on("update_channel_list", function (data) {
 
     channel_table.innerHTML = "";
     channel_list = data.Channel_List;
-    channel_list.forEach(channel => {
+    let total_size = 0;
+    console.log(data);
+    for( const channel of channel_list ) {
+        let channel_size = parseInt(channel.Item_Size);
+        if( !isNaN(channel_size) ) total_size += channel_size;
+
         add_row_to_channel_table(channel);
-    });
+    }
+
+    total_library_size.textContent = number_si_suffix(total_size);
 });
 
 socket.on("new_channel_added", function (new_channel) {

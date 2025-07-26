@@ -451,16 +451,16 @@ class DataHandler:
             self.log.info(f'Found {len(folder_info["filename_list"])} files and {len(folder_info["id_list"])} IDs in {channel_folder_path}.')
             return folder_info
 
-    def count_media_files_for_channel( self, channel ) -> tuple[int, str]:
+    def count_media_files_for_channel( self, channel ) -> tuple[int, int]:
         channel_folder_path = self.audio_download_folder if channel["Audio_Only"] else self.download_folder
         channel_folder_path = os.path.join(channel_folder_path, channel["Name"])
 
         if not os.path.isdir(channel_folder_path) or channel["Name"] == "":
-            return -1, "-"
+            return -1, 0
 
         return self.count_media_files(channel_folder_path)
 
-    def count_media_files(self, channel_folder_path) -> tuple[int, str]:
+    def count_media_files(self, channel_folder_path) -> tuple[int, int]:
         video_item_count = 0
         audio_item_count = 0
         files_size = 0
@@ -481,7 +481,7 @@ class DataHandler:
 
         self.log.info(f"count_media_files|{channel_folder_path}> Found {video_item_count} video files and {audio_item_count} audio files, totalling {number_si_suffix(files_size)}B")
 
-        return video_item_count + audio_item_count, number_si_suffix(files_size)
+        return video_item_count + audio_item_count, files_size
 
     def cleanup_old_files(self, channel_folder_path, channel):
         days_to_keep = channel["Keep_Days"]
